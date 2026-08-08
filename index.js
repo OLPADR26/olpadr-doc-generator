@@ -10,6 +10,9 @@ app.use(require('cors')());
 function fetchBuffer(url) {
   return new Promise((resolve, reject) => {
     https.get(url, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        return fetchBuffer(res.headers.location).then(resolve).catch(reject);
+      }
       const chunks = [];
       res.on('data', chunk => chunks.push(chunk));
       res.on('end', () => resolve(Buffer.concat(chunks)));
@@ -22,6 +25,10 @@ app.post('/generate', async (req, res) => {
   try {
     const { templateUrl, data, fileName } = req.body;
     const templateBuffer = await fetchBuffer(templateUrl);
+
+    console.log('Downloaded size:', templateBuffer.length, 'bytes');
+    console.log('First 100 characters:', templateBuffer.toString('utf8', 0, 100));
+
     const zip = new PizZip(templateBuffer);
     const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
     doc.render(data);
