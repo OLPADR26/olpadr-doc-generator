@@ -23,9 +23,28 @@ function fetchBuffer(url) {
   });
 }
 
+function cleanMarkdown(text) {
+  let cleaned = text;
+
+  // Force a blank line before any table row (line starting with |)
+  cleaned = cleaned.replace(/([^\n])\n(\|)/g, '$1\n\n$2');
+
+  // Force a blank line before numbered list items (1. 2. 3. etc.)
+  cleaned = cleaned.replace(/([^\n])\n(\d+\.\s)/g, '$1\n\n$2');
+
+  // Force a blank line before bullet list items (- or *)
+  cleaned = cleaned.replace(/([^\n])\n([-*]\s)/g, '$1\n\n$2');
+
+  // Turn long runs of = = = = or _ _ _ _ into a clean horizontal rule
+  cleaned = cleaned.replace(/(=\s){5,}=?/g, '\n\n---\n\n');
+  cleaned = cleaned.replace(/(_\s){5,}_?/g, '\n\n---\n\n');
+
+  return cleaned;
+}
+
 app.post('/generate', async (req, res) => {
   try {
-        console.log('RECEIVED BODY:', JSON.stringify(req.body));
+    console.log('RECEIVED BODY:', JSON.stringify(req.body));
     const { templateUrl, markdownContent, fileName, headerText } = req.body;
 
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doc-'));
@@ -37,8 +56,8 @@ app.post('/generate', async (req, res) => {
     const templateBuffer = await fetchBuffer(templateUrl);
     fs.writeFileSync(referenceDocPath, templateBuffer);
 
-    // Build the markdown content (optional header line + the real report body)
-    const fullMarkdown = (headerText ? `${headerText}\n\n---\n\n` : '') + markdownContent;
+    // Build the markdown content (optional header line + the real report body, cleaned up)
+    const fullMarkdown = (headerText ? `${headerText}\n\n---\n\n` : '') + cleanMarkdown(markdownContent);
     fs.writeFileSync(markdownPath, fullMarkdown, 'utf8');
 
     // Run Pandoc: convert markdown into a docx, styled using our letterhead as reference
