@@ -25,6 +25,7 @@ function fetchBuffer(url) {
 
 app.post('/generate', async (req, res) => {
   try {
+        console.log('RECEIVED BODY:', JSON.stringify(req.body));
     const { templateUrl, markdownContent, fileName, headerText } = req.body;
 
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doc-'));
