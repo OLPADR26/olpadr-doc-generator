@@ -26,21 +26,23 @@ function fetchBuffer(url) {
 function cleanMarkdown(text) {
   let cleaned = text;
 
-  // Force a blank line before any table row (line starting with |)
+  // Convert long runs of "= = = =" or "_ _ _ _" into a clean single divider line
+  cleaned = cleaned.replace(/(?:=\s){5,}=?/g, '\n\n---\n\n');
+  cleaned = cleaned.replace(/(?:_\s){5,}_?/g, '\n\n---\n\n');
+
+  // Break each table row onto its own line, even if it's stuck mid-sentence
+  cleaned = cleaned.replace(/([^\n|])\s\|(?=[^|]*\|)/g, '$1\n|');
   cleaned = cleaned.replace(/([^\n])\n(\|)/g, '$1\n\n$2');
 
-  // Force a blank line before numbered list items (1. 2. 3. etc.)
-  cleaned = cleaned.replace(/([^\n])\n(\d+\.\s)/g, '$1\n\n$2');
+  // Break numbered list items (1. 2. 3.) onto their own lines
+  cleaned = cleaned.replace(/([^\n])\s(\d+\.\s)/g, '$1\n\n$2');
 
-  // Force a blank line before bullet list items (- or *)
-  cleaned = cleaned.replace(/([^\n])\n([-*]\s)/g, '$1\n\n$2');
-
-  // Turn long runs of = = = = or _ _ _ _ into a clean horizontal rule
-  cleaned = cleaned.replace(/(=\s){5,}=?/g, '\n\n---\n\n');
-  cleaned = cleaned.replace(/(_\s){5,}_?/g, '\n\n---\n\n');
+  // Break bullet list items onto their own lines
+  cleaned = cleaned.replace(/([^\n])\s([-*]\s)/g, '$1\n\n$2');
 
   return cleaned;
 }
+
 
 app.post('/generate', async (req, res) => {
   try {
