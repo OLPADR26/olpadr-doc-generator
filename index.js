@@ -31,8 +31,19 @@ function cleanMarkdown(text) {
   cleaned = cleaned.replace(/([^\n])\n(\|)/g, '$1\n\n$2');
   cleaned = cleaned.replace(/([^\n])\s(\d+\.\s)/g, '$1\n\n$2');
   cleaned = cleaned.replace(/([^\n])\s([-*]\s)/g, '$1\n\n$2');
+
+  // Ensure a blank line AFTER every table (a table row followed by a non-pipe line)
+  cleaned = cleaned.replace(/(\|.*\|)\n([^\n|])/g, '$1\n\n$2');
+
+  // Ensure a blank line after any heading line (lines starting with #)
+  cleaned = cleaned.replace(/(^#{1,6}\s.*$)\n([^\n#])/gm, '$1\n\n$2');
+
+  // Ensure double line breaks between paragraphs generally (collapse 3+ newlines to exactly 2)
+  cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
+
   return cleaned;
 }
+
 
 app.post('/generate', async (req, res) => {
   try {
