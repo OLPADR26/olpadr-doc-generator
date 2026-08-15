@@ -63,7 +63,8 @@ app.post('/generate', async (req, res) => {
     // Step 1: Markdown -> docx (using letterhead as style reference)
     await new Promise((resolve, reject) => {
       exec(
-        `pandoc "${markdownPath}" -o "${docxPath}" --reference-doc="${referenceDocPath}"`,
+        
+        `pandoc "${markdownPath}" -o "${docxPath}" --reference-doc="${referenceDocPath}" -f markdown+pipe_tables+grid_tables --standalone`,
         (error) => error ? reject(error) : resolve()
       );
     });
