@@ -25,59 +25,56 @@ function fetchBuffer(url) {
 
 function cleanMarkdown(text) {
   let cleaned = text;
-
-  // Convert long runs of "= = = =" or "_ _ _ _" into a clean single divider line
   cleaned = cleaned.replace(/(?:=\s){5,}=?/g, '\n\n---\n\n');
   cleaned = cleaned.replace(/(?:_\s){5,}_?/g, '\n\n---\n\n');
-
-  // Break each table row onto its own line, even if it's stuck mid-sentence
   cleaned = cleaned.replace(/([^\n|])\s\|(?=[^|]*\|)/g, '$1\n|');
   cleaned = cleaned.replace(/([^\n])\n(\|)/g, '$1\n\n$2');
-
-  // Break numbered list items (1. 2. 3.) onto their own lines
   cleaned = cleaned.replace(/([^\n])\s(\d+\.\s)/g, '$1\n\n$2');
-
-  // Break bullet list items onto their own lines
   cleaned = cleaned.replace(/([^\n])\s([-*]\s)/g, '$1\n\n$2');
-
   return cleaned;
 }
 
-
 app.post('/generate', async (req, res) => {
   try {
-    console.log('RECEIVED BODY:', JSON.stringify(req.body));
     const { templateUrl, markdownContent, fileName, headerText } = req.body;
 
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doc-'));
     const referenceDocPath = path.join(tempDir, 'reference.docx');
     const markdownPath = path.join(tempDir, 'content.md');
-    const outputPath = path.join(tempDir, 'output.docx');
+    const docxPath = path.join(tempDir, 'output.docx');
 
-    // Download the letterhead template to use as the style reference
     const templateBuffer = await fetchBuffer(templateUrl);
     fs.writeFileSync(referenceDocPath, templateBuffer);
 
-    // Build the markdown content (optional header line + the real report body, cleaned up)
     const fullMarkdown = (headerText ? `${headerText}\n\n---\n\n` : '') + cleanMarkdown(markdownContent);
     fs.writeFileSync(markdownPath, fullMarkdown, 'utf8');
 
-    // Run Pandoc: convert markdown into a docx, styled using our letterhead as reference
+    // Step 1: Markdown -> docx (using letterhead as style reference)
     await new Promise((resolve, reject) => {
       exec(
-        `pandoc "${markdownPath}" -o "${outputPath}" --reference-doc="${referenceDocPath}"`,
+        `pandoc "${markdownPath}" -o "${docxPath}" --reference-doc="${referenceDocPath}"`,
         (error) => error ? reject(error) : resolve()
       );
     });
 
-    const outputBuffer = fs.readFileSync(outputPath);
+    // Step 2: docx -> pdf (using LibreOffice)
+    await new Promise((resolve, reject) => {
+      exec(
+        `libreoffice --headless --convert-to pdf --outdir "${tempDir}" "${docxPath}"`,
+        (error) => error ? reject(error) : resolve()
+      );
+    });
+
+    const pdfPath = path.join(tempDir, 'output.pdf');
+    const pdfBuffer = fs.readFileSync(pdfPath);
+    const pdfFileName = (fileName || 'report.docx').replace(/\.docx$/i, '.pdf');
 
     res.set({
-      'Content-Type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      'Content-Disposition': `attachment; filename="${fileName || 'report.docx'}"`,
-      'Content-Length': outputBuffer.length
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `attachment; filename="${pdfFileName}"`,
+      'Content-Length': pdfBuffer.length
     });
-    res.send(outputBuffer);
+    res.send(pdfBuffer);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
