@@ -92,14 +92,11 @@ app.post('/generate', async (req, res) => {
       throw new Error('PDF conversion failed — no output file was created');
     }
 
-    const pdfBuffer = fs.readFileSync(pdfPath);
-
+   const pdfBuffer = fs.readFileSync(pdfPath);
     if (pdfBuffer.length < 100) {
       throw new Error('PDF conversion produced an empty or invalid file');
     }
 
-    const pdfPath = path.join(tempDir, 'output.pdf');
-    const pdfBuffer = fs.readFileSync(pdfPath);
     const pdfFileName = (fileName || 'report.docx').replace(/\.docx$/i, '.pdf');
 
     res.set({
