@@ -69,13 +69,34 @@ app.post('/generate', async (req, res) => {
       );
     });
 
-    // Step 2: docx -> pdf (using LibreOffice)
+    
+      // Step 2: docx -> pdf (using LibreOffice)
     await new Promise((resolve, reject) => {
       exec(
-        `libreoffice --headless --convert-to pdf --outdir "${tempDir}" "${docxPath}"`,
-        (error) => error ? reject(error) : resolve()
+        `libreoffice --headless -env:UserInstallation=file://${tempDir}/loconfig --convert-to pdf --outdir "${tempDir}" "${docxPath}"`,
+        { timeout: 60000 },
+        (error, stdout, stderr) => {
+          if (error) {
+            console.error('LibreOffice error:', error);
+            console.error('LibreOffice stderr:', stderr);
+            return reject(error);
+          }
+          resolve();
+        }
       );
     });
+
+    const pdfPath = path.join(tempDir, 'output.pdf');
+
+    if (!fs.existsSync(pdfPath)) {
+      throw new Error('PDF conversion failed — no output file was created');
+    }
+
+    const pdfBuffer = fs.readFileSync(pdfPath);
+
+    if (pdfBuffer.length < 100) {
+      throw new Error('PDF conversion produced an empty or invalid file');
+    }
 
     const pdfPath = path.join(tempDir, 'output.pdf');
     const pdfBuffer = fs.readFileSync(pdfPath);
