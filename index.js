@@ -23,6 +23,78 @@ function fetchBuffer(url) {
   });
 }
 
+// Turn "Section N: Title" and "Artifact Name: Title" lines into real bold headings
+function boldTitles(text) {
+  let out = text;
+  // Section headers -> Heading 2
+  out = out.replace(/^Section \d+:\s*(.+)$/gm, '## Section: $1');
+  // Artifact block titles -> Heading 2
+  out = out.replace(/^Artifact Name:\s*(.+)$/gm, '## $1');
+  // Common sub-section titles used across artifacts -> Heading 3
+  const subTitles = [
+    'Primary Accountability Context', 'Leading Asset Statement', 'Terminal Gap', 'Causal Anchor',
+    'Active Constraints', 'Assumptions', 'Executive Directive for Causal Mapping',
+    'Causal Spine Description', 'Logic Matrix', 'Visual Placeholder', 'Triage Brief',
+    'Full Minimum Viable Data Field List', 'Executive Recommendation', 'Programme Strengths',
+    'The Leakage Constraint', 'Baseline Gate Declaration', 'What-If Scenario Matrix',
+    'What-If Simulation Matrix', 'Scenario Notes', 'Simulation Pivot', 'What to Stop Doing',
+    'What to Double Down On', 'Constraint Workaround', 'Cost Per Beneficiary',
+    'Executive Architecture Directive', 'Sprint Pulse Report', 'Evidence Gap Alert',
+    'Active Constraint Check', 'Evidence Sensor', 'Sprint Gate Decision',
+    'Identified Chaos', 'Failure Type', 'Clinical Diagnostics', 'Evidence Ledger',
+    'Artifact Readiness', 'Causal Logic', 'Constraints', 'Auditor\u2019s Verdict',
+    'Reconciliation Note', 'Singular Architectural Move', 'Asset Statement',
+    'Terminal Constraint', 'Strategic Pivot', 'Current Evidence Position',
+    'Outcome Commitments', 'Evidence Gap', 'Data System Status', 'Minimum Viable Evidence Architecture',
+    'Indicator Architecture', 'Claim Control', 'Cost Position', 'Protocol Pathway',
+    'Post-Protocol Position', 'Decision Artifact', 'Conditions', 'Next-Season Plan',
+    'Grant-Ready Decision', 'Singular Strategic Recommendation'
+  ];
+  subTitles.forEach(title => {
+    const escaped = title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    out = out.replace(new RegExp(`^${escaped}$`, 'gm'), `### ${title}`);
+  });
+  return out;
+}
+
+// Calculate proportional column widths for a markdown table block
+function balanceTableColumns(tableBlock) {
+  const lines = tableBlock.split('\n').filter(l => l.trim().startsWith('|'));
+  if (lines.length < 2) return tableBlock;
+
+  const headerCells = lines[0].split('|').slice(1, -1).map(c => c.trim());
+  const colCount = headerCells.length;
+  const maxLen = new Array(colCount).fill(3);
+
+  lines.forEach((line, idx) => {
+    if (idx === 1) return; // skip separator row
+    const cells = line.split('|').slice(1, -1);
+    cells.forEach((cell, i) => {
+      if (i < colCount) {
+        const len = cell.trim().length;
+        if (len > maxLen[i]) maxLen[i] = len;
+      }
+    });
+  });
+
+  // Cap each column's proportional weight so no single column dominates completely
+  const capped = maxLen.map(l => Math.min(Math.max(l, 6), 40));
+  const newSeparator = '|' + capped.map(l => '-'.repeat(l)).join('|') + '|';
+
+  lines[1] = newSeparator;
+  return lines.join('\n');
+}
+
+function balanceAllTables(text) {
+  const blocks = text.split(/\n\n(?=\|)/);
+  return blocks.map(block => {
+    if (block.trim().startsWith('|')) {
+      return balanceTableColumns(block);
+    }
+    return block;
+  }).join('\n\n');
+}
+
 function cleanMarkdown(text) {
   let cleaned = text;
   cleaned = cleaned.replace(/(?:=\s){5,}=?/g, '\n\n---\n\n');
@@ -31,19 +103,15 @@ function cleanMarkdown(text) {
   cleaned = cleaned.replace(/([^\n])\n(\|)/g, '$1\n\n$2');
   cleaned = cleaned.replace(/([^\n])\s(\d+\.\s)/g, '$1\n\n$2');
   cleaned = cleaned.replace(/([^\n])\s([-*]\s)/g, '$1\n\n$2');
-
-  // Ensure a blank line AFTER every table (a table row followed by a non-pipe line)
   cleaned = cleaned.replace(/(\|.*\|)\n([^\n|])/g, '$1\n\n$2');
-
-  // Ensure a blank line after any heading line (lines starting with #)
   cleaned = cleaned.replace(/(^#{1,6}\s.*$)\n([^\n#])/gm, '$1\n\n$2');
-
-  // Ensure double line breaks between paragraphs generally (collapse 3+ newlines to exactly 2)
   cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
+
+  cleaned = boldTitles(cleaned);
+  cleaned = balanceAllTables(cleaned);
 
   return cleaned;
 }
-
 
 app.post('/generate', async (req, res) => {
   try {
@@ -60,17 +128,13 @@ app.post('/generate', async (req, res) => {
     const fullMarkdown = (headerText ? `${headerText}\n\n---\n\n` : '') + cleanMarkdown(markdownContent);
     fs.writeFileSync(markdownPath, fullMarkdown, 'utf8');
 
-    // Step 1: Markdown -> docx (using letterhead as style reference)
     await new Promise((resolve, reject) => {
       exec(
-        
-        `pandoc "${markdownPath}" -o "${docxPath}" --reference-doc="${referenceDocPath}" -f markdown+pipe_tables+grid_tables --standalone`,
+        `pandoc "${markdownPath}" -o "${docxPath}" --reference-doc="${referenceDocPath}" -f markdown+pipe_tables --standalone`,
         (error) => error ? reject(error) : resolve()
       );
     });
 
-    
-      // Step 2: docx -> pdf (using LibreOffice)
     await new Promise((resolve, reject) => {
       exec(
         `libreoffice --headless -env:UserInstallation=file://${tempDir}/loconfig --convert-to pdf --outdir "${tempDir}" "${docxPath}"`,
@@ -87,18 +151,14 @@ app.post('/generate', async (req, res) => {
     });
 
     const pdfPath = path.join(tempDir, 'output.pdf');
-
     if (!fs.existsSync(pdfPath)) {
       throw new Error('PDF conversion failed — no output file was created');
     }
-
-   const pdfBuffer = fs.readFileSync(pdfPath);
+    const pdfBuffer = fs.readFileSync(pdfPath);
     if (pdfBuffer.length < 100) {
       throw new Error('PDF conversion produced an empty or invalid file');
     }
-
     const pdfFileName = (fileName || 'report.docx').replace(/\.docx$/i, '.pdf');
-
     res.set({
       'Content-Type': 'application/pdf',
       'Content-Disposition': `attachment; filename="${pdfFileName}"`,
