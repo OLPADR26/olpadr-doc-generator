@@ -23,14 +23,14 @@ function fetchBuffer(url) {
   });
 }
 
-// Turn "Section N: Title" and "Artifact Name: Title" lines into real bold headings
+// Turn "Section N: Title" and "Artifact Name: Title" lines into real, FORCED-bold headings
 function boldTitles(text) {
   let out = text;
-  // Section headers -> Heading 2
-  out = out.replace(/^Section \d+:\s*(.+)$/gm, '## Section: $1');
-  // Artifact block titles -> Heading 2
-  out = out.replace(/^Artifact Name:\s*(.+)$/gm, '## $1');
-  // Common sub-section titles used across artifacts -> Heading 3
+  // Section headers -> Heading + forced bold
+  out = out.replace(/^Section \d+:\s*(.+)$/gm, (match, title) => `## **Section: ${title}**`);
+  // Artifact block titles -> Heading + forced bold
+  out = out.replace(/^Artifact Name:\s*(.+)$/gm, (match, title) => `## **${title}**`);
+
   const subTitles = [
     'Primary Accountability Context', 'Leading Asset Statement', 'Terminal Gap', 'Causal Anchor',
     'Active Constraints', 'Assumptions', 'Executive Directive for Causal Mapping',
@@ -52,47 +52,9 @@ function boldTitles(text) {
   ];
   subTitles.forEach(title => {
     const escaped = title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    out = out.replace(new RegExp(`^${escaped}$`, 'gm'), `### ${title}`);
+    out = out.replace(new RegExp(`^${escaped}$`, 'gm'), `### **${title}**`);
   });
   return out;
-}
-
-// Calculate proportional column widths for a markdown table block
-function balanceTableColumns(tableBlock) {
-  const lines = tableBlock.split('\n').filter(l => l.trim().startsWith('|'));
-  if (lines.length < 2) return tableBlock;
-
-  const headerCells = lines[0].split('|').slice(1, -1).map(c => c.trim());
-  const colCount = headerCells.length;
-  const maxLen = new Array(colCount).fill(3);
-
-  lines.forEach((line, idx) => {
-    if (idx === 1) return; // skip separator row
-    const cells = line.split('|').slice(1, -1);
-    cells.forEach((cell, i) => {
-      if (i < colCount) {
-        const len = cell.trim().length;
-        if (len > maxLen[i]) maxLen[i] = len;
-      }
-    });
-  });
-
-  // Cap each column's proportional weight so no single column dominates completely
-  const capped = maxLen.map(l => Math.min(Math.max(l, 6), 40));
-  const newSeparator = '|' + capped.map(l => '-'.repeat(l)).join('|') + '|';
-
-  lines[1] = newSeparator;
-  return lines.join('\n');
-}
-
-function balanceAllTables(text) {
-  const blocks = text.split(/\n\n(?=\|)/);
-  return blocks.map(block => {
-    if (block.trim().startsWith('|')) {
-      return balanceTableColumns(block);
-    }
-    return block;
-  }).join('\n\n');
 }
 
 function cleanMarkdown(text) {
@@ -108,7 +70,6 @@ function cleanMarkdown(text) {
   cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
 
   cleaned = boldTitles(cleaned);
-  cleaned = balanceAllTables(cleaned);
 
   return cleaned;
 }
