@@ -1,7 +1,5 @@
 const express = require('express');
-const PizZip = require('pizzip');
-const Docxtemplater = require('docxtemplater');
-const HTMLModule = require('docxtemplater-html-module');
+const DocxMerger = require('docx-merger');
 const { marked } = require('marked');
 const https = require('https');
 const { exec } = require('child_process');
@@ -27,8 +25,20 @@ function fetchBuffer(url) {
   });
 }
 
+function execPromise(cmd, opts) {
+  return new Promise((resolve, reject) => {
+    exec(cmd, opts, (error, stdout, stderr) => {
+      if (error) {
+        console.error('Command failed:', cmd);
+        console.error(stderr);
+        return reject(error);
+      }
+      resolve(stdout);
+    });
+  });
+}
+
 // Turn "Section N: Title" and "Artifact Name: Title" lines into real markdown headings
-// (## so they become bold via the HTML <h2> tag, with plain black text forced by CSS below)
 function normalizeMarkdown(text) {
   let out = text;
 
@@ -66,55 +76,64 @@ function normalizeMarkdown(text) {
 }
 
 app.post('/generate', async (req, res) => {
+  let tempDir;
   try {
     const { templateUrl, markdownContent, fileName, headerText, dateIssued } = req.body;
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doc-'));
 
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doc-'));
-    const docxPath = path.join(tempDir, 'output.docx');
-
-    // 1. Convert the raw agent markdown into real HTML (proper tables, headings, bold, lists)
+    // 1. Markdown -> HTML
     const fullMarkdown = (headerText ? `${headerText}\n\n---\n\n` : '') + normalizeMarkdown(markdownContent);
     const htmlBody = marked.parse(fullMarkdown);
+    const fullHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+      body { font-family: Calibri, Arial, sans-serif; color: #000000; font-size: 11pt; }
+      h2, h3 { color: #000000; font-weight: bold; }
+      table { border-collapse: collapse; width: 100%; margin: 8px 0; }
+      table, th, td { border: 1px solid #444444; padding: 4px 8px; }
+    </style></head><body>${htmlBody}</body></html>`;
 
-    // 2. Download the letterhead template
+    const htmlPath = path.join(tempDir, 'content.html');
+    fs.writeFileSync(htmlPath, fullHtml, 'utf8');
+
+    // 2. HTML -> DOCX via LibreOffice (real Word tables/bold/lists, no paid module needed)
+    await execPromise(
+      `libreoffice --headless -env:UserInstallation=file://${tempDir}/loconfig1 --convert-to docx --outdir "${tempDir}" "${htmlPath}"`,
+      { timeout: 60000 }
+    );
+    const contentDocxPath = path.join(tempDir, 'content.docx');
+    if (!fs.existsSync(contentDocxPath)) {
+      throw new Error('HTML to DOCX conversion failed — no content.docx was produced');
+    }
+
+    // 3. Download the letterhead template.
+    //    NOTE: the template no longer needs a {~content} placeholder — its body
+    //    can be empty (or just a cover section). The generated content is appended
+    //    after it, and the template's headers/footers/styles/margins are kept.
     const templateBuffer = await fetchBuffer(templateUrl);
+    const templatePath = path.join(tempDir, 'template.docx');
+    fs.writeFileSync(templatePath, templateBuffer);
 
-    // 3. Inject the HTML into the template's {~content} placeholder using the HTML module.
-    //    This creates REAL Word tables, real bold headings, real paragraphs — not text guessing.
-    const zip = new PizZip(templateBuffer);
-    const htmlModule = new HTMLModule({
-      // Force headings to render as bold, black, normal-size text (no colored heading style)
-      styleSets: {
-        h2: { bold: true, color: '000000' },
-        h3: { bold: true, color: '000000' }
+    // 4. Merge template + generated content
+    const templateBin = fs.readFileSync(templatePath, 'binary');
+    const contentBin = fs.readFileSync(contentDocxPath, 'binary');
+    const merger = new DocxMerger({}, [templateBin, contentBin]);
+
+    const mergedPath = path.join(tempDir, 'output.docx');
+    await new Promise((resolve, reject) => {
+      try {
+        merger.save('nodebuffer', (data) => {
+          fs.writeFileSync(mergedPath, data);
+          resolve();
+        });
+      } catch (e) {
+        reject(e);
       }
     });
-    const doc = new Docxtemplater(zip, {
-      modules: [htmlModule],
-      paragraphLoop: true,
-      linebreaks: true
-    });
 
-    doc.render({ content: htmlBody, date_issued: dateIssued || '' });
-
-    const outputBuffer = doc.getZip().generate({ type: 'nodebuffer' });
-    fs.writeFileSync(docxPath, outputBuffer);
-
-    // 4. Convert the finished docx to PDF
-    await new Promise((resolve, reject) => {
-      exec(
-        `libreoffice --headless -env:UserInstallation=file://${tempDir}/loconfig --convert-to pdf --outdir "${tempDir}" "${docxPath}"`,
-        { timeout: 60000 },
-        (error, stdout, stderr) => {
-          if (error) {
-            console.error('LibreOffice error:', error);
-            console.error('LibreOffice stderr:', stderr);
-            return reject(error);
-          }
-          resolve();
-        }
-      );
-    });
+    // 5. Convert merged docx -> PDF
+    await execPromise(
+      `libreoffice --headless -env:UserInstallation=file://${tempDir}/loconfig2 --convert-to pdf --outdir "${tempDir}" "${mergedPath}"`,
+      { timeout: 60000 }
+    );
 
     const pdfPath = path.join(tempDir, 'output.pdf');
     if (!fs.existsSync(pdfPath)) {
@@ -135,6 +154,10 @@ app.post('/generate', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
+  } finally {
+    if (tempDir) {
+      fs.rm(tempDir, { recursive: true, force: true }, () => {});
+    }
   }
 });
 
