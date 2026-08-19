@@ -2,7 +2,7 @@ const express = require('express');
 const DocxMerger = require('docx-merger');
 const { marked } = require('marked');
 const https = require('https');
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -25,15 +25,13 @@ function fetchBuffer(url) {
   });
 }
 
-function execPromise(cmd, opts) {
-  return new Promise((resolve, reject) => {
-    exec(cmd, opts, (error, stdout, stderr) => {
-      if (error) {
-        console.error('Command failed:', cmd);
-        console.error(stderr);
-        return reject(error);
-      }
-      resolve(stdout);
+// Runs a command via execFile (array args, no shell string-interpolation/quoting
+// bugs) and ALWAYS returns stdout/stderr, even on failure, so callers can log or
+// surface the real LibreOffice error instead of a generic message.
+function runCommand(cmd, args, opts) {
+  return new Promise((resolve) => {
+    execFile(cmd, args, { timeout: 60000, ...opts }, (error, stdout, stderr) => {
+      resolve({ error, stdout: stdout || '', stderr: stderr || '' });
     });
   });
 }
@@ -94,17 +92,56 @@ app.post('/generate', async (req, res) => {
     const htmlPath = path.join(tempDir, 'content.html');
     fs.writeFileSync(htmlPath, fullHtml, 'utf8');
 
-    // 2. HTML -> DOCX via LibreOffice (real Word tables/bold/lists, no paid module needed)
-    await execPromise(
-      `libreoffice --headless -env:UserInstallation=file://${tempDir}/loconfig1 --convert-to docx --outdir "${tempDir}" "${htmlPath}"`,
-      { timeout: 60000 }
-    );
-    const contentDocxPath = path.join(tempDir, 'content.docx');
-    if (!fs.existsSync(contentDocxPath)) {
-      throw new Error('HTML to DOCX conversion failed — no content.docx was produced');
+    // 2. HTML -> ODT -> DOCX via LibreOffice.
+    //    Going straight from HTML to DOCX is a known weak spot for LibreOffice's
+    //    filters (especially with tables). ODT is LibreOffice's native format, so
+    //    HTML->ODT is a much more faithful conversion, and ODT->DOCX is a
+    //    well-trodden, reliable hop. Two short conversions beat one flaky one.
+    const step1 = await runCommand('libreoffice', [
+      '--headless',
+      `-env:UserInstallation=file://${tempDir}/loconfig1`,
+      '--convert-to', 'odt:writer8',
+      '--outdir', tempDir,
+      htmlPath
+    ]);
+    console.log('[html->odt] stdout:', step1.stdout);
+    console.log('[html->odt] stderr:', step1.stderr);
+
+    const contentOdtPath = path.join(tempDir, 'content.odt');
+    if (step1.error || !fs.existsSync(contentOdtPath)) {
+      const dirListing = fs.readdirSync(tempDir).join(', ');
+      throw new Error(
+        `HTML to ODT conversion failed. ` +
+        `exec_error=${step1.error ? step1.error.message : 'none'} | ` +
+        `stderr=${step1.stderr.slice(0, 500)} | ` +
+        `stdout=${step1.stdout.slice(0, 500)} | ` +
+        `tempDir_contents=[${dirListing}]`
+      );
     }
 
-    // 3. Download the letterhead template.
+    const step1b = await runCommand('libreoffice', [
+      '--headless',
+      `-env:UserInstallation=file://${tempDir}/loconfig1b`,
+      '--convert-to', 'docx:MS Word 2007 XML',
+      '--outdir', tempDir,
+      contentOdtPath
+    ]);
+    console.log('[odt->docx] stdout:', step1b.stdout);
+    console.log('[odt->docx] stderr:', step1b.stderr);
+
+    const contentDocxPath = path.join(tempDir, 'content.docx');
+    if (step1b.error || !fs.existsSync(contentDocxPath)) {
+      const dirListing = fs.readdirSync(tempDir).join(', ');
+      throw new Error(
+        `ODT to DOCX conversion failed. ` +
+        `exec_error=${step1b.error ? step1b.error.message : 'none'} | ` +
+        `stderr=${step1b.stderr.slice(0, 500)} | ` +
+        `stdout=${step1b.stdout.slice(0, 500)} | ` +
+        `tempDir_contents=[${dirListing}]`
+      );
+    }
+
+    // 4. Download the letterhead template.
     //    NOTE: the template no longer needs a {~content} placeholder — its body
     //    can be empty (or just a cover section). The generated content is appended
     //    after it, and the template's headers/footers/styles/margins are kept.
@@ -112,7 +149,7 @@ app.post('/generate', async (req, res) => {
     const templatePath = path.join(tempDir, 'template.docx');
     fs.writeFileSync(templatePath, templateBuffer);
 
-    // 4. Merge template + generated content
+    // 5. Merge template + generated content
     const templateBin = fs.readFileSync(templatePath, 'binary');
     const contentBin = fs.readFileSync(contentDocxPath, 'binary');
     const merger = new DocxMerger({}, [templateBin, contentBin]);
@@ -129,15 +166,23 @@ app.post('/generate', async (req, res) => {
       }
     });
 
-    // 5. Convert merged docx -> PDF
-    await execPromise(
-      `libreoffice --headless -env:UserInstallation=file://${tempDir}/loconfig2 --convert-to pdf --outdir "${tempDir}" "${mergedPath}"`,
-      { timeout: 60000 }
-    );
+    // 6. Convert merged docx -> PDF
+    const step2 = await runCommand('libreoffice', [
+      '--headless',
+      `-env:UserInstallation=file://${tempDir}/loconfig2`,
+      '--convert-to', 'pdf',
+      '--outdir', tempDir,
+      mergedPath
+    ]);
+    console.log('[docx->pdf] stdout:', step2.stdout);
+    console.log('[docx->pdf] stderr:', step2.stderr);
 
     const pdfPath = path.join(tempDir, 'output.pdf');
-    if (!fs.existsSync(pdfPath)) {
-      throw new Error('PDF conversion failed — no output file was created');
+    if (step2.error || !fs.existsSync(pdfPath)) {
+      throw new Error(
+        `PDF conversion failed. exec_error=${step2.error ? step2.error.message : 'none'} | ` +
+        `stderr=${step2.stderr.slice(0, 500)}`
+      );
     }
     const pdfBuffer = fs.readFileSync(pdfPath);
     if (pdfBuffer.length < 100) {
