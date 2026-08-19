@@ -8,7 +8,7 @@
     "cors": "^2.8.5",
     "pizzip": "^3.1.4",
     "docxtemplater": "^3.40.0",
-    "docxtemplater-html-module": "^3.36.0",
+    "docxtemplater-html-module": "^3.35.0",
     "marked": "^9.1.6"
   }
 }
