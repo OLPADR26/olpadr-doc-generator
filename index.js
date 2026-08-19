@@ -23,13 +23,45 @@ function fetchBuffer(url) {
   });
 }
 
-// Turn "Section N: Title" and "Artifact Name: Title" lines into real, FORCED-bold headings
+// Force EVERY single line break to become a real paragraph break,
+// EXCEPT inside table blocks (where single line breaks between rows are required)
+// and EXCEPT between consecutive list items.
+function forceParagraphBreaks(text) {
+  const lines = text.split('\n');
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const nextLine = lines[i + 1] || '';
+    out.push(line);
+
+    const thisIsTableRow = /^\s*\|/.test(line);
+    const nextIsTableRow = /^\s*\|/.test(nextLine);
+    const thisIsListItem = /^\s*([-*]|\d+\.)\s/.test(line);
+    const nextIsListItem = /^\s*([-*]|\d+\.)\s/.test(nextLine);
+    const lineIsBlank = line.trim() === '';
+    const nextIsBlank = nextLine.trim() === '';
+
+    // Keep table rows tight against each other (no blank line inserted between them)
+    if (thisIsTableRow && nextIsTableRow) continue;
+    // Keep list items tight against each other
+    if (thisIsListItem && nextIsListItem) continue;
+    // Don't double up existing blank lines
+    if (lineIsBlank || nextIsBlank) continue;
+    // Don't break right before a table starts (that blank line is inserted separately below)
+    if (nextIsTableRow) { out.push(''); continue; }
+
+    // Otherwise: force a blank line so this becomes its own paragraph
+    out.push('');
+  }
+  return out.join('\n');
+}
+
+// Turn "Section N: Title" and "Artifact Name: Title" into forced BOLD PLAIN TEXT
+// (not a heading style) so it never inherits the template's colored Heading style.
 function boldTitles(text) {
   let out = text;
-  // Section headers -> Heading + forced bold
-  out = out.replace(/^Section \d+:\s*(.+)$/gm, (match, title) => `## **Section: ${title}**`);
-  // Artifact block titles -> Heading + forced bold
-  out = out.replace(/^Artifact Name:\s*(.+)$/gm, (match, title) => `## **${title}**`);
+  out = out.replace(/^Section \d+:\s*(.+)$/gm, (match, title) => `**Section: ${title}**`);
+  out = out.replace(/^Artifact Name:\s*(.+)$/gm, (match, title) => `**${title}**`);
 
   const subTitles = [
     'Primary Accountability Context', 'Leading Asset Statement', 'Terminal Gap', 'Causal Anchor',
@@ -52,25 +84,22 @@ function boldTitles(text) {
   ];
   subTitles.forEach(title => {
     const escaped = title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    out = out.replace(new RegExp(`^${escaped}$`, 'gm'), `### **${title}**`);
+    out = out.replace(new RegExp(`^${escaped}$`, 'gm'), `**${title}**`);
   });
   return out;
 }
 
-
 function cleanMarkdown(text) {
   let cleaned = text;
+
   cleaned = cleaned.replace(/(?:=\s){5,}=?/g, '\n\n---\n\n');
   cleaned = cleaned.replace(/(?:_\s){5,}_?/g, '\n\n---\n\n');
-  cleaned = cleaned.replace(/([^\n|])\s\|(?=[^|]*\|)/g, '$1\n|');
-  cleaned = cleaned.replace(/([^\n])\n(\|)/g, '$1\n\n$2');
-  cleaned = cleaned.replace(/([^\n])\s(\d+\.\s)/g, '$1\n\n$2');
-  cleaned = cleaned.replace(/([^\n])\s([-*]\s)/g, '$1\n\n$2');
-  cleaned = cleaned.replace(/(\|.*\|)\n([^\n|])/g, '$1\n\n$2');
-  cleaned = cleaned.replace(/(^#{1,6}\s.*$)\n([^\n#])/gm, '$1\n\n$2');
-  cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
 
   cleaned = boldTitles(cleaned);
+  cleaned = forceParagraphBreaks(cleaned);
+
+  // Final safety cleanup: collapse any 3+ blank lines down to exactly 2 line breaks
+  cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
 
   return cleaned;
 }
