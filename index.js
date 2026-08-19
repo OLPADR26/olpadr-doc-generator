@@ -1,4 +1,8 @@
 const express = require('express');
+const PizZip = require('pizzip');
+const Docxtemplater = require('docxtemplater');
+const HTMLModule = require('docxtemplater-html-module');
+const { marked } = require('marked');
 const https = require('https');
 const { exec } = require('child_process');
 const fs = require('fs');
@@ -23,45 +27,16 @@ function fetchBuffer(url) {
   });
 }
 
-// Force EVERY single line break to become a real paragraph break,
-// EXCEPT inside table blocks (where single line breaks between rows are required)
-// and EXCEPT between consecutive list items.
-function forceParagraphBreaks(text) {
-  const lines = text.split('\n');
-  const out = [];
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const nextLine = lines[i + 1] || '';
-    out.push(line);
-
-    const thisIsTableRow = /^\s*\|/.test(line);
-    const nextIsTableRow = /^\s*\|/.test(nextLine);
-    const thisIsListItem = /^\s*([-*]|\d+\.)\s/.test(line);
-    const nextIsListItem = /^\s*([-*]|\d+\.)\s/.test(nextLine);
-    const lineIsBlank = line.trim() === '';
-    const nextIsBlank = nextLine.trim() === '';
-
-    // Keep table rows tight against each other (no blank line inserted between them)
-    if (thisIsTableRow && nextIsTableRow) continue;
-    // Keep list items tight against each other
-    if (thisIsListItem && nextIsListItem) continue;
-    // Don't double up existing blank lines
-    if (lineIsBlank || nextIsBlank) continue;
-    // Don't break right before a table starts (that blank line is inserted separately below)
-    if (nextIsTableRow) { out.push(''); continue; }
-
-    // Otherwise: force a blank line so this becomes its own paragraph
-    out.push('');
-  }
-  return out.join('\n');
-}
-
-// Turn "Section N: Title" and "Artifact Name: Title" into forced BOLD PLAIN TEXT
-// (not a heading style) so it never inherits the template's colored Heading style.
-function boldTitles(text) {
+// Turn "Section N: Title" and "Artifact Name: Title" lines into real markdown headings
+// (## so they become bold via the HTML <h2> tag, with plain black text forced by CSS below)
+function normalizeMarkdown(text) {
   let out = text;
-  out = out.replace(/^Section \d+:\s*(.+)$/gm, (match, title) => `**Section: ${title}**`);
-  out = out.replace(/^Artifact Name:\s*(.+)$/gm, (match, title) => `**${title}**`);
+
+  out = out.replace(/(?:=\s){5,}=?/g, '\n\n---\n\n');
+  out = out.replace(/(?:_\s){5,}_?/g, '\n\n---\n\n');
+
+  out = out.replace(/^Section \d+:\s*(.+)$/gm, '## Section: $1');
+  out = out.replace(/^Artifact Name:\s*(.+)$/gm, '## $1');
 
   const subTitles = [
     'Primary Accountability Context', 'Leading Asset Statement', 'Terminal Gap', 'Causal Anchor',
@@ -84,48 +59,48 @@ function boldTitles(text) {
   ];
   subTitles.forEach(title => {
     const escaped = title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    out = out.replace(new RegExp(`^${escaped}$`, 'gm'), `**${title}**`);
+    out = out.replace(new RegExp(`^${escaped}$`, 'gm'), `### ${title}`);
   });
+
   return out;
-}
-
-function cleanMarkdown(text) {
-  let cleaned = text;
-
-  cleaned = cleaned.replace(/(?:=\s){5,}=?/g, '\n\n---\n\n');
-  cleaned = cleaned.replace(/(?:_\s){5,}_?/g, '\n\n---\n\n');
-
-  cleaned = boldTitles(cleaned);
-  cleaned = forceParagraphBreaks(cleaned);
-
-  // Final safety cleanup: collapse any 3+ blank lines down to exactly 2 line breaks
-  cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
-
-  return cleaned;
 }
 
 app.post('/generate', async (req, res) => {
   try {
-    const { templateUrl, markdownContent, fileName, headerText } = req.body;
+    const { templateUrl, markdownContent, fileName, headerText, dateIssued } = req.body;
 
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doc-'));
-    const referenceDocPath = path.join(tempDir, 'reference.docx');
-    const markdownPath = path.join(tempDir, 'content.md');
     const docxPath = path.join(tempDir, 'output.docx');
 
+    // 1. Convert the raw agent markdown into real HTML (proper tables, headings, bold, lists)
+    const fullMarkdown = (headerText ? `${headerText}\n\n---\n\n` : '') + normalizeMarkdown(markdownContent);
+    const htmlBody = marked.parse(fullMarkdown);
+
+    // 2. Download the letterhead template
     const templateBuffer = await fetchBuffer(templateUrl);
-    fs.writeFileSync(referenceDocPath, templateBuffer);
 
-    const fullMarkdown = (headerText ? `${headerText}\n\n---\n\n` : '') + cleanMarkdown(markdownContent);
-    fs.writeFileSync(markdownPath, fullMarkdown, 'utf8');
-
-    await new Promise((resolve, reject) => {
-      exec(
-        `pandoc "${markdownPath}" -o "${docxPath}" --reference-doc="${referenceDocPath}" -f markdown+pipe_tables --standalone`,
-        (error) => error ? reject(error) : resolve()
-      );
+    // 3. Inject the HTML into the template's {~content} placeholder using the HTML module.
+    //    This creates REAL Word tables, real bold headings, real paragraphs — not text guessing.
+    const zip = new PizZip(templateBuffer);
+    const htmlModule = new HTMLModule({
+      // Force headings to render as bold, black, normal-size text (no colored heading style)
+      styleSets: {
+        h2: { bold: true, color: '000000' },
+        h3: { bold: true, color: '000000' }
+      }
+    });
+    const doc = new Docxtemplater(zip, {
+      modules: [htmlModule],
+      paragraphLoop: true,
+      linebreaks: true
     });
 
+    doc.render({ content: htmlBody, date_issued: dateIssued || '' });
+
+    const outputBuffer = doc.getZip().generate({ type: 'nodebuffer' });
+    fs.writeFileSync(docxPath, outputBuffer);
+
+    // 4. Convert the finished docx to PDF
     await new Promise((resolve, reject) => {
       exec(
         `libreoffice --headless -env:UserInstallation=file://${tempDir}/loconfig --convert-to pdf --outdir "${tempDir}" "${docxPath}"`,
@@ -149,6 +124,7 @@ app.post('/generate', async (req, res) => {
     if (pdfBuffer.length < 100) {
       throw new Error('PDF conversion produced an empty or invalid file');
     }
+
     const pdfFileName = (fileName || 'report.docx').replace(/\.docx$/i, '.pdf');
     res.set({
       'Content-Type': 'application/pdf',
