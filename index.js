@@ -1,6 +1,5 @@
 const express = require('express');
 const PizZip = require('pizzip');
-const { DOMParser, XMLSerializer } = require('@xmldom/xmldom');
 const { marked } = require('marked');
 // Preserve single line breaks (e.g. "Source Step: X\nProtocol: Y") as <br> instead
 // of collapsing them into one run-on line — confirmed this doesn't affect table
@@ -78,165 +77,143 @@ function normalizeMarkdown(text) {
   return out;
 }
 
-// ---------- docx XML merge helpers (non-namespace-aware: match literal "w:" prefixed tags/attrs) ----------
-
-function parseXml(str) {
-  return new DOMParser().parseFromString(str, 'text/xml');
-}
-function serializeXml(doc) {
-  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n' + new XMLSerializer().serializeToString(doc);
-}
-function directChildren(el, tagName) {
-  const out = [];
-  for (let i = 0; i < el.childNodes.length; i++) {
-    const c = el.childNodes[i];
-    if (c.nodeType === 1 && (!tagName || c.tagName === tagName)) out.push(c);
+// ---------- docx XML merge: pure string/regex splicing, no DOM parser ----------
+// A prior version used @xmldom/xmldom to parse+re-serialize document.xml. It was
+// never actually executed before shipping (no network to install it in dev), and
+// it produced a docx LibreOffice couldn't open. This version does surgical string
+// splicing instead — every operation here is plain JS string/regex work, which was
+// tested end-to-end (against the real letterhead + real generated content, verified
+// by rendering the resulting PDF) before being put here.
+function mergeDocxXmlStrings({ templateDocumentXml, contentDocumentXml, templateNumberingXml, contentNumberingXml, templateStylesXml, contentStylesXml, dateIssuedText }) {
+  // 1. Replace the letterhead's date placeholder, if present, with the real date.
+  let mergedTemplateDoc = templateDocumentXml;
+  if (dateIssuedText) {
+    mergedTemplateDoc = mergedTemplateDoc.replace('[Month DD, YYYY]', dateIssuedText);
   }
-  return out;
-}
-function allText(doc) {
-  return Array.from(doc.getElementsByTagName('w:t'));
+
+  // 2. Extract the content body's paragraphs/tables (everything between <w:body>
+  //    and its trailing <w:sectPr>...), and find the template's own trailing
+  //    sectPr position so we can splice content in before it, preserving its
+  //    headers/footers/margins.
+  const contentBodyStart = contentDocumentXml.indexOf('<w:body>') + '<w:body>'.length;
+  const contentSectPrIdx = contentDocumentXml.lastIndexOf('<w:sectPr');
+  if (contentBodyStart < '<w:body>'.length || contentSectPrIdx === -1) {
+    throw new Error('Could not locate <w:body> or trailing <w:sectPr> in generated content document.xml');
+  }
+  let contentBodyFragment = contentDocumentXml.slice(contentBodyStart, contentSectPrIdx);
+
+  const templateSectPrIdx = mergedTemplateDoc.lastIndexOf('<w:sectPr');
+  if (mergedTemplateDoc.indexOf('<w:body>') === -1 || templateSectPrIdx === -1) {
+    throw new Error('Could not locate <w:body> or trailing <w:sectPr> in template document.xml');
+  }
+
+  // 3. Numbering merge: remap numId/abstractNumId in the content fragment so they
+  //    don't collide with anything the template already defines.
+  let mergedNumberingXml = templateNumberingXml;
+  if (contentNumberingXml) {
+    const abstractBlocks = contentNumberingXml.match(/<w:abstractNum\b[\s\S]*?<\/w:abstractNum>/g) || [];
+    const numBlocks = contentNumberingXml.match(/<w:num\b[\s\S]*?<\/w:num>/g) || [];
+
+    if (templateNumberingXml) {
+      const existingAbstractIds = Array.from(templateNumberingXml.matchAll(/<w:abstractNum\b[^>]*\bw:abstractNumId="(\d+)"/g)).map(m => parseInt(m[1], 10));
+      const existingNumIds = Array.from(templateNumberingXml.matchAll(/<w:num\b[^>]*\bw:numId="(\d+)"/g)).map(m => parseInt(m[1], 10));
+      const abstractOffset = existingAbstractIds.length ? Math.max(...existingAbstractIds) + 1 : 0;
+      const numOffset = existingNumIds.length ? Math.max(...existingNumIds) + 1 : 0;
+
+      const abstractIdMap = {};
+      const rewrittenAbstractBlocks = abstractBlocks.map(block => {
+        const m = block.match(/w:abstractNumId="(\d+)"/);
+        if (!m) return block;
+        const oldId = parseInt(m[1], 10);
+        const newId = oldId + abstractOffset;
+        abstractIdMap[oldId] = newId;
+        return block.replace(`w:abstractNumId="${oldId}"`, `w:abstractNumId="${newId}"`);
+      });
+
+      const numIdMap = {};
+      const rewrittenNumBlocks = numBlocks.map(block => {
+        const numIdMatch = block.match(/<w:num\b[^>]*\bw:numId="(\d+)"/);
+        if (!numIdMatch) return block;
+        const oldNumId = parseInt(numIdMatch[1], 10);
+        const newNumId = oldNumId + numOffset;
+        numIdMap[oldNumId] = newNumId;
+        let rewritten = block.replace(`w:numId="${oldNumId}"`, `w:numId="${newNumId}"`);
+        const absRefMatch = rewritten.match(/<w:abstractNumId w:val="(\d+)"/);
+        if (absRefMatch) {
+          const oldAbs = parseInt(absRefMatch[1], 10);
+          if (abstractIdMap[oldAbs] !== undefined) {
+            rewritten = rewritten.replace(`<w:abstractNumId w:val="${oldAbs}"`, `<w:abstractNumId w:val="${abstractIdMap[oldAbs]}"`);
+          }
+        }
+        return rewritten;
+      });
+
+      contentBodyFragment = contentBodyFragment.replace(/<w:numId w:val="(\d+)"/g, (full, oldVal) => {
+        const mapped = numIdMap[parseInt(oldVal, 10)];
+        return mapped !== undefined ? `<w:numId w:val="${mapped}"` : full;
+      });
+
+      const insertion = rewrittenAbstractBlocks.join('') + rewrittenNumBlocks.join('');
+      mergedNumberingXml = templateNumberingXml.replace('</w:numbering>', insertion + '</w:numbering>');
+    } else {
+      mergedNumberingXml = contentNumberingXml;
+    }
+  }
+
+  // 4. Styles merge: copy over any style the content uses that the template
+  //    doesn't already define (by styleId).
+  let mergedStylesXml = templateStylesXml;
+  if (contentStylesXml && templateStylesXml) {
+    const styleBlocks = contentStylesXml.match(/<w:style\b[\s\S]*?<\/w:style>/g) || [];
+    const missingBlocks = styleBlocks.filter(block => {
+      const m = block.match(/w:styleId="([^"]+)"/);
+      if (!m) return false;
+      return !templateStylesXml.includes(`w:styleId="${m[1]}"`);
+    });
+    if (missingBlocks.length) {
+      mergedStylesXml = templateStylesXml.replace('</w:styles>', missingBlocks.join('') + '</w:styles>');
+    }
+  }
+
+  // 5. Splice the (remapped) content fragment into the template body, right
+  //    before its trailing sectPr.
+  const finalDocumentXml =
+    mergedTemplateDoc.slice(0, templateSectPrIdx) +
+    contentBodyFragment +
+    mergedTemplateDoc.slice(templateSectPrIdx);
+
+  return { documentXml: finalDocumentXml, numberingXml: mergedNumberingXml, stylesXml: mergedStylesXml };
 }
 
 // Merges generated `contentDocxBuffer` (body only) into `templateDocxBuffer`
-// (which supplies headers/footers/styles/sectPr), remapping numbering IDs so
-// bullet/numbered lists from the content don't collide with the template's own,
-// and copying over any paragraph/character styles the content uses that the
-// template doesn't already define. Returns a Buffer of the merged .docx.
+// (which supplies headers/footers/styles/sectPr). Returns a Buffer of the merged .docx.
 function mergeDocx(templateDocxBuffer, contentDocxBuffer, dateIssuedText) {
   const templateZip = new PizZip(templateDocxBuffer);
   const contentZip = new PizZip(contentDocxBuffer);
 
-  const templateDoc = parseXml(templateZip.file('word/document.xml').asText());
-  const contentDoc = parseXml(contentZip.file('word/document.xml').asText());
+  const templateDocumentFile = templateZip.file('word/document.xml');
+  const contentDocumentFile = contentZip.file('word/document.xml');
+  if (!templateDocumentFile) throw new Error('Template docx has no word/document.xml — is it a valid Word file?');
+  if (!contentDocumentFile) throw new Error('Generated content docx has no word/document.xml');
 
-  const templateBody = templateDoc.getElementsByTagName('w:body')[0];
-  const contentBody = contentDoc.getElementsByTagName('w:body')[0];
-  if (!templateBody) throw new Error('Template docx has no <w:body> — is it a valid Word file?');
-  if (!contentBody) throw new Error('Generated content docx has no <w:body>');
-
-  const templateSectPr = directChildren(templateBody, 'w:sectPr')[0] || null;
-  const contentChildren = directChildren(contentBody).filter(c => c.tagName !== 'w:sectPr');
-
-  // 1. Replace the letterhead's date placeholder text, if present, with the real date.
-  if (dateIssuedText) {
-    const tNodes = allText(templateDoc);
-    for (const node of tNodes) {
-      if (node.textContent && node.textContent.includes('[Month DD, YYYY]')) {
-        node.textContent = node.textContent.replace('[Month DD, YYYY]', dateIssuedText);
-      }
-    }
-  }
-
-  // 2. Merge numbering.xml (bullet/numbered list defs), remapping IDs so the
-  //    content's lists don't collide with anything the template already defines.
   const templateNumberingFile = templateZip.file('word/numbering.xml');
   const contentNumberingFile = contentZip.file('word/numbering.xml');
-  let newNumberingXmlStr = null;
-
-  if (contentNumberingFile) {
-    const contentNumberingDoc = parseXml(contentNumberingFile.asText());
-    const contentAbstractNums = Array.from(contentNumberingDoc.getElementsByTagName('w:abstractNum'));
-    const contentNums = Array.from(contentNumberingDoc.getElementsByTagName('w:num'));
-
-    if (templateNumberingFile) {
-      const templateNumberingDoc = parseXml(templateNumberingFile.asText());
-      const templateNumberingRoot = templateNumberingDoc.getElementsByTagName('w:numbering')[0];
-
-      const existingNumIds = Array.from(templateNumberingDoc.getElementsByTagName('w:num'))
-        .map(n => parseInt(n.getAttribute('w:numId'), 10))
-        .filter(n => !isNaN(n));
-      const existingAbstractIds = Array.from(templateNumberingDoc.getElementsByTagName('w:abstractNum'))
-        .map(a => parseInt(a.getAttribute('w:abstractNumId'), 10))
-        .filter(n => !isNaN(n));
-
-      const numOffset = existingNumIds.length ? Math.max(...existingNumIds) + 1 : 0;
-      const abstractOffset = existingAbstractIds.length ? Math.max(...existingAbstractIds) + 1 : 0;
-
-      const abstractIdMap = {};
-      contentAbstractNums.forEach(absNum => {
-        const oldId = parseInt(absNum.getAttribute('w:abstractNumId'), 10);
-        const newId = oldId + abstractOffset;
-        abstractIdMap[oldId] = newId;
-        absNum.setAttribute('w:abstractNumId', String(newId));
-        templateNumberingRoot.appendChild(absNum);
-      });
-
-      const numIdMap = {};
-      contentNums.forEach(num => {
-        const oldId = parseInt(num.getAttribute('w:numId'), 10);
-        const newId = oldId + numOffset;
-        numIdMap[oldId] = newId;
-        num.setAttribute('w:numId', String(newId));
-        const absRef = directChildren(num, 'w:abstractNumId')[0];
-        if (absRef) {
-          const oldAbs = parseInt(absRef.getAttribute('w:val'), 10);
-          if (abstractIdMap[oldAbs] !== undefined) {
-            absRef.setAttribute('w:val', String(abstractIdMap[oldAbs]));
-          }
-        }
-        templateNumberingRoot.appendChild(num);
-      });
-
-      // remap numId references inside the content body's paragraphs to match
-      const contentNumIdRefs = Array.from(contentBody.getElementsByTagName('w:numId'));
-      for (const el of contentNumIdRefs) {
-        const oldVal = parseInt(el.getAttribute('w:val'), 10);
-        if (numIdMap[oldVal] !== undefined) {
-          el.setAttribute('w:val', String(numIdMap[oldVal]));
-        }
-      }
-
-      newNumberingXmlStr = serializeXml(templateNumberingDoc);
-    } else {
-      newNumberingXmlStr = serializeXml(contentNumberingDoc);
-    }
-  }
-
-  // 3. Copy over any styles (e.g. Heading2, ListParagraph, TableGrid) the content
-  //    uses that the template doesn't already define, so they render correctly
-  //    instead of silently falling back to Word defaults.
   const templateStylesFile = templateZip.file('word/styles.xml');
   const contentStylesFile = contentZip.file('word/styles.xml');
-  let newStylesXmlStr = null;
 
-  if (templateStylesFile && contentStylesFile) {
-    const templateStylesDoc = parseXml(templateStylesFile.asText());
-    const contentStylesDoc = parseXml(contentStylesFile.asText());
-    const templateStylesRoot = templateStylesDoc.getElementsByTagName('w:styles')[0];
+  const result = mergeDocxXmlStrings({
+    templateDocumentXml: templateDocumentFile.asText(),
+    contentDocumentXml: contentDocumentFile.asText(),
+    templateNumberingXml: templateNumberingFile ? templateNumberingFile.asText() : null,
+    contentNumberingXml: contentNumberingFile ? contentNumberingFile.asText() : null,
+    templateStylesXml: templateStylesFile ? templateStylesFile.asText() : null,
+    contentStylesXml: contentStylesFile ? contentStylesFile.asText() : null,
+    dateIssuedText
+  });
 
-    const existingStyleIds = new Set(
-      Array.from(templateStylesDoc.getElementsByTagName('w:style')).map(s => s.getAttribute('w:styleId'))
-    );
-    const contentStyles = Array.from(contentStylesDoc.getElementsByTagName('w:style'));
-    for (const style of contentStyles) {
-      const sid = style.getAttribute('w:styleId');
-      if (sid && !existingStyleIds.has(sid)) {
-        templateStylesRoot.appendChild(style);
-      }
-    }
-    newStylesXmlStr = serializeXml(templateStylesDoc);
-  }
-
-  // 4. Splice the content's paragraphs/tables into the template body, right
-  //    before its final sectPr, so the template's headers/footers/margins govern.
-  if (templateSectPr) {
-    for (const child of contentChildren) {
-      templateBody.insertBefore(child, templateSectPr);
-    }
-  } else {
-    for (const child of contentChildren) {
-      templateBody.appendChild(child);
-    }
-  }
-
-  const newDocumentXmlStr = serializeXml(templateDoc);
-
-  // 5. Repackage as a new docx: same zip as the template, with document.xml
-  //    (and numbering.xml/styles.xml if touched) swapped for the merged versions.
-  templateZip.file('word/document.xml', newDocumentXmlStr);
-  if (newNumberingXmlStr) templateZip.file('word/numbering.xml', newNumberingXmlStr);
-  if (newStylesXmlStr) templateZip.file('word/styles.xml', newStylesXmlStr);
+  templateZip.file('word/document.xml', result.documentXml);
+  if (result.numberingXml) templateZip.file('word/numbering.xml', result.numberingXml);
+  if (result.stylesXml) templateZip.file('word/styles.xml', result.stylesXml);
 
   return templateZip.generate({ type: 'nodebuffer' });
 }
