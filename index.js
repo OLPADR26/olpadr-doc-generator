@@ -1,6 +1,4 @@
 const express = require('express');
-const DocxMerger = require('docx-merger');
-const { marked } = require('marked');
 const https = require('https');
 const { execFile } = require('child_process');
 const fs = require('fs');
@@ -25,9 +23,6 @@ function fetchBuffer(url) {
   });
 }
 
-// Runs a command via execFile (array args, no shell string-interpolation/quoting
-// bugs) and ALWAYS returns stdout/stderr, even on failure, so callers can log or
-// surface the real LibreOffice error instead of a generic message.
 function runCommand(cmd, args, opts) {
   return new Promise((resolve) => {
     execFile(cmd, args, { timeout: 60000, ...opts }, (error, stdout, stderr) => {
@@ -36,15 +31,39 @@ function runCommand(cmd, args, opts) {
   });
 }
 
-// Turn "Section N: Title" and "Artifact Name: Title" lines into real markdown headings
-function normalizeMarkdown(text) {
+// Force EVERY line to be its own paragraph, except inside table rows and list items
+// (which must stay tight together for Pandoc to recognise them as tables/lists).
+function forceParagraphBreaks(text) {
+  const lines = text.split('\n');
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const nextLine = lines[i + 1] || '';
+    out.push(line);
+
+    const thisIsTableRow = /^\s*\|/.test(line);
+    const nextIsTableRow = /^\s*\|/.test(nextLine);
+    const thisIsListItem = /^\s*([-*]|\d+\.)\s/.test(line);
+    const nextIsListItem = /^\s*([-*]|\d+\.)\s/.test(nextLine);
+    const lineIsBlank = line.trim() === '';
+    const nextIsBlank = nextLine.trim() === '';
+
+    if (thisIsTableRow && nextIsTableRow) continue;
+    if (thisIsListItem && nextIsListItem) continue;
+    if (lineIsBlank || nextIsBlank) continue;
+    if (nextIsTableRow) { out.push(''); continue; }
+
+    out.push('');
+  }
+  return out.join('\n');
+}
+
+// Turn "Section N: Title" and "Artifact Name: Title" into forced PLAIN BOLD text
+// (never a heading style) so it never inherits the template's colored Heading style.
+function boldTitles(text) {
   let out = text;
-
-  out = out.replace(/(?:=\s){5,}=?/g, '\n\n---\n\n');
-  out = out.replace(/(?:_\s){5,}_?/g, '\n\n---\n\n');
-
-  out = out.replace(/^Section \d+:\s*(.+)$/gm, '## Section: $1');
-  out = out.replace(/^Artifact Name:\s*(.+)$/gm, '## $1');
+  out = out.replace(/^Section \d+:\s*(.+)$/gm, (m, title) => `**Section: ${title}**`);
+  out = out.replace(/^Artifact Name:\s*(.+)$/gm, (m, title) => `**${title}**`);
 
   const subTitles = [
     'Primary Accountability Context', 'Leading Asset Statement', 'Terminal Gap', 'Causal Anchor',
@@ -67,112 +86,61 @@ function normalizeMarkdown(text) {
   ];
   subTitles.forEach(title => {
     const escaped = title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    out = out.replace(new RegExp(`^${escaped}$`, 'gm'), `### ${title}`);
+    out = out.replace(new RegExp(`^${escaped}$`, 'gm'), `**${title}**`);
   });
-
   return out;
+}
+
+function cleanMarkdown(text) {
+  let cleaned = text;
+  cleaned = cleaned.replace(/(?:=\s){5,}=?/g, '\n\n---\n\n');
+  cleaned = cleaned.replace(/(?:_\s){5,}_?/g, '\n\n---\n\n');
+  cleaned = boldTitles(cleaned);
+  cleaned = forceParagraphBreaks(cleaned);
+  cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
+  return cleaned;
 }
 
 app.post('/generate', async (req, res) => {
   let tempDir;
   try {
-    const { templateUrl, markdownContent, fileName, headerText, dateIssued } = req.body;
+    const { templateUrl, markdownContent, fileName, headerText } = req.body;
+
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doc-'));
+    const referenceDocPath = path.join(tempDir, 'reference.docx');
+    const markdownPath = path.join(tempDir, 'content.md');
+    const docxPath = path.join(tempDir, 'output.docx');
 
-    // 1. Markdown -> HTML
-    const fullMarkdown = (headerText ? `${headerText}\n\n---\n\n` : '') + normalizeMarkdown(markdownContent);
-    const htmlBody = marked.parse(fullMarkdown);
-    const fullHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
-      body { font-family: Calibri, Arial, sans-serif; color: #000000; font-size: 11pt; }
-      h2, h3 { color: #000000; font-weight: bold; }
-      table { border-collapse: collapse; width: 100%; margin: 8px 0; }
-      table, th, td { border: 1px solid #444444; padding: 4px 8px; }
-    </style></head><body>${htmlBody}</body></html>`;
-
-    const htmlPath = path.join(tempDir, 'content.html');
-    fs.writeFileSync(htmlPath, fullHtml, 'utf8');
-
-    // 2. HTML -> ODT -> DOCX via LibreOffice.
-    //    Going straight from HTML to DOCX is a known weak spot for LibreOffice's
-    //    filters (especially with tables). ODT is LibreOffice's native format, so
-    //    HTML->ODT is a much more faithful conversion, and ODT->DOCX is a
-    //    well-trodden, reliable hop. Two short conversions beat one flaky one.
-    const step1 = await runCommand('libreoffice', [
-      '--headless',
-      `-env:UserInstallation=file://${tempDir}/loconfig1`,
-      '--convert-to', 'odt:writer8',
-      '--outdir', tempDir,
-      htmlPath
-    ]);
-    console.log('[html->odt] stdout:', step1.stdout);
-    console.log('[html->odt] stderr:', step1.stderr);
-
-    const contentOdtPath = path.join(tempDir, 'content.odt');
-    if (step1.error || !fs.existsSync(contentOdtPath)) {
-      const dirListing = fs.readdirSync(tempDir).join(', ');
-      throw new Error(
-        `HTML to ODT conversion failed. ` +
-        `exec_error=${step1.error ? step1.error.message : 'none'} | ` +
-        `stderr=${step1.stderr.slice(0, 500)} | ` +
-        `stdout=${step1.stdout.slice(0, 500)} | ` +
-        `tempDir_contents=[${dirListing}]`
-      );
-    }
-
-    const step1b = await runCommand('libreoffice', [
-      '--headless',
-      `-env:UserInstallation=file://${tempDir}/loconfig1b`,
-      '--convert-to', 'docx:MS Word 2007 XML',
-      '--outdir', tempDir,
-      contentOdtPath
-    ]);
-    console.log('[odt->docx] stdout:', step1b.stdout);
-    console.log('[odt->docx] stderr:', step1b.stderr);
-
-    const contentDocxPath = path.join(tempDir, 'content.docx');
-    if (step1b.error || !fs.existsSync(contentDocxPath)) {
-      const dirListing = fs.readdirSync(tempDir).join(', ');
-      throw new Error(
-        `ODT to DOCX conversion failed. ` +
-        `exec_error=${step1b.error ? step1b.error.message : 'none'} | ` +
-        `stderr=${step1b.stderr.slice(0, 500)} | ` +
-        `stdout=${step1b.stdout.slice(0, 500)} | ` +
-        `tempDir_contents=[${dirListing}]`
-      );
-    }
-
-    // 4. Download the letterhead template.
-    //    NOTE: the template no longer needs a {~content} placeholder — its body
-    //    can be empty (or just a cover section). The generated content is appended
-    //    after it, and the template's headers/footers/styles/margins are kept.
     const templateBuffer = await fetchBuffer(templateUrl);
-    const templatePath = path.join(tempDir, 'template.docx');
-    fs.writeFileSync(templatePath, templateBuffer);
+    fs.writeFileSync(referenceDocPath, templateBuffer);
 
-    // 5. Merge template + generated content
-    const templateBin = fs.readFileSync(templatePath, 'binary');
-    const contentBin = fs.readFileSync(contentDocxPath, 'binary');
-    const merger = new DocxMerger({}, [templateBin, contentBin]);
+    const fullMarkdown = (headerText ? `${headerText}\n\n---\n\n` : '') + cleanMarkdown(markdownContent);
+    fs.writeFileSync(markdownPath, fullMarkdown, 'utf8');
 
-    const mergedPath = path.join(tempDir, 'output.docx');
-    await new Promise((resolve, reject) => {
-      try {
-        merger.save('nodebuffer', (data) => {
-          fs.writeFileSync(mergedPath, data);
-          resolve();
-        });
-      } catch (e) {
-        reject(e);
-      }
-    });
+    // Single command: markdown -> docx, styled using your letterhead (logo, header, footer)
+    const step1 = await runCommand('pandoc', [
+      markdownPath,
+      '-o', docxPath,
+      '--reference-doc', referenceDocPath,
+      '-f', 'markdown+pipe_tables',
+      '--standalone'
+    ]);
+    console.log('[pandoc] stdout:', step1.stdout);
+    console.log('[pandoc] stderr:', step1.stderr);
 
-    // 6. Convert merged docx -> PDF
+    if (step1.error || !fs.existsSync(docxPath)) {
+      throw new Error(
+        `Pandoc conversion failed. exec_error=${step1.error ? step1.error.message : 'none'} | stderr=${step1.stderr.slice(0, 500)}`
+      );
+    }
+
+    // docx -> pdf
     const step2 = await runCommand('libreoffice', [
       '--headless',
-      `-env:UserInstallation=file://${tempDir}/loconfig2`,
+      `-env:UserInstallation=file://${tempDir}/loconfig`,
       '--convert-to', 'pdf',
       '--outdir', tempDir,
-      mergedPath
+      docxPath
     ]);
     console.log('[docx->pdf] stdout:', step2.stdout);
     console.log('[docx->pdf] stderr:', step2.stderr);
@@ -180,10 +148,10 @@ app.post('/generate', async (req, res) => {
     const pdfPath = path.join(tempDir, 'output.pdf');
     if (step2.error || !fs.existsSync(pdfPath)) {
       throw new Error(
-        `PDF conversion failed. exec_error=${step2.error ? step2.error.message : 'none'} | ` +
-        `stderr=${step2.stderr.slice(0, 500)}`
+        `PDF conversion failed. exec_error=${step2.error ? step2.error.message : 'none'} | stderr=${step2.stderr.slice(0, 500)}`
       );
     }
+
     const pdfBuffer = fs.readFileSync(pdfPath);
     if (pdfBuffer.length < 100) {
       throw new Error('PDF conversion produced an empty or invalid file');
