@@ -1,16 +1,10 @@
-
-
 {
   "name": "olpadr-doc-gen",
   "version": "1.0.0",
   "main": "index.js",
-  "scripts": {
-    "start": "node index.js"
-  },
+  "scripts": { "start": "node index.js" },
   "dependencies": {
     "express": "^4.18.0",
-    "cors": "^2.8.5",
-    "docx-merger": "^1.2.2",
-    "marked": "^9.1.6"
+    "cors": "^2.8.5"
   }
 }
