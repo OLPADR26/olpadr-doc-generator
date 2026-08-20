@@ -2,9 +2,14 @@
   "name": "olpadr-doc-gen",
   "version": "1.0.0",
   "main": "index.js",
-  "scripts": { "start": "node index.js" },
+  "scripts": {
+    "start": "node index.js"
+  },
   "dependencies": {
     "express": "^4.18.0",
-    "cors": "^2.8.5"
+    "cors": "^2.8.5",
+    "pizzip": "^3.1.4",
+    "@xmldom/xmldom": "^0.9.0",
+    "marked": "^9.1.6"
   }
 }
