@@ -199,24 +199,22 @@ function mergeTwoTemplates(page1Buffer, page2Buffer, contentDocxBuffer, dateIssu
   if (dateIssuedText) {
     p1Doc = p1Doc.replace('[Month DD, YYYY]', dateIssuedText);
   }
-  // Drop page1's own "[Body content begins here]" placeholder paragraph — content now
-  // starts on page 2, so page 1 should show only its own fixed cover content.
-  p1Doc = p1Doc.replace(
-    /<w:p [^>]*><w:r><w:rPr><w:i\/><w:iCs\/><w:color w:val="B4B2A9"\/><\/w:rPr><w:t>\[Body content begins here\]<\/w:t><\/w:r><w:bookmarkEnd[^/]*\/><\/w:p>/,
-    ''
-  );
 
   const p1BodyStart = p1Doc.indexOf('<w:body>') + '<w:body>'.length;
   const p1SectPrStart = p1Doc.lastIndexOf('<w:sectPr');
-  const p1SectPrEnd = p1Doc.indexOf('</w:sectPr>', p1SectPrStart) + '</w:sectPr>'.length;
-  const p1Paragraphs = p1Doc.slice(p1BodyStart, p1SectPrStart);
-  const p1SectPrXml = p1Doc.slice(p1SectPrStart, p1SectPrEnd);
+  let p1Paragraphs = p1Doc.slice(p1BodyStart, p1SectPrStart);
 
   const p2SectPrStart = p2Doc.lastIndexOf('<w:sectPr');
   const p2SectPrEnd = p2Doc.indexOf('</w:sectPr>', p2SectPrStart) + '</w:sectPr>'.length;
   const p2SectPrXml = p2Doc.slice(p2SectPrStart, p2SectPrEnd);
 
-  const p1Parts = extractSectPrParts(p1SectPrXml);
+  // Content starts ON page 1, flowing into page 2+ as it overflows — this is a single
+  // Word section using "different first page" (titlePg), not two separate sections.
+  // That means page geometry (margins) is shared across every page; page1 and page2
+  // templates use slightly different margins (0.625" vs 0.7" left/right), so page2's
+  // margins are used throughout, since they govern the majority of pages. Replace
+  // page1's "[Body content begins here]" placeholder with the actual generated content,
+  // right where it belongs, instead of dropping it.
   const p2Parts = extractSectPrParts(p2SectPrXml);
 
   const cBodyStart = contentDoc.indexOf('<w:body>') + '<w:body>'.length;
@@ -241,17 +239,30 @@ function mergeTwoTemplates(page1Buffer, page2Buffer, contentDocxBuffer, dateIssu
   const contentStylesFile = contentZip.file('word/styles.xml');
   const mergedStylesXml = mergeMissingStyles(p1StylesXml, [p2StylesXml, contentStylesFile ? contentStylesFile.asText() : null]);
 
-  // Build the two-section document.xml
-  const section1BreakSectPr =
-    `<w:sectPr><w:headerReference w:type="default" r:id="rIdHdrP1"/>` +
-    `<w:footerReference w:type="default" r:id="rIdFtrP1"/>` +
-    `${p1Parts.pgSz}${p1Parts.pgMar}${p1Parts.cols}${p1Parts.grid}</w:sectPr>`;
-  const section1BreakParagraph = `<w:p><w:pPr>${section1BreakSectPr}</w:pPr></w:p>`;
+  // Replace page1's "[Body content begins here]" placeholder paragraph with the actual
+  // generated content — content starts ON page 1, right after the date line.
+  const placeholderPattern = /<w:p [^>]*><w:r><w:rPr><w:i\/><w:iCs\/><w:color w:val="B4B2A9"\/><\/w:rPr><w:t>\[Body content begins here\]<\/w:t><\/w:r><w:bookmarkEnd[^/]*\/><\/w:p>/;
+  if (placeholderPattern.test(p1Paragraphs)) {
+    p1Paragraphs = p1Paragraphs.replace(placeholderPattern, contentFragment);
+  } else {
+    // Fallback: if the exact placeholder shape isn't found, just append content
+    // after page1's own paragraphs rather than silently dropping it.
+    p1Paragraphs = p1Paragraphs + contentFragment;
+  }
 
+  // Single section, "different first page" (titlePg): page 1 uses the "first"
+  // header/footer (page1 template's), every subsequent page uses the "default"
+  // header/footer (page2 template's) — pagination happens naturally as content
+  // overflows, no manual page-break bookkeeping needed.
   const finalSectPr =
-    `<w:sectPr><w:headerReference w:type="default" r:id="rIdHdrP2"/>` +
+    `<w:sectPr>` +
+    `<w:headerReference w:type="default" r:id="rIdHdrP2"/>` +
     `<w:footerReference w:type="default" r:id="rIdFtrP2"/>` +
-    `${p2Parts.pgSz}${p2Parts.pgMar}${p2Parts.cols}${p2Parts.grid}</w:sectPr>`;
+    `<w:headerReference w:type="first" r:id="rIdHdrP1"/>` +
+    `<w:footerReference w:type="first" r:id="rIdFtrP1"/>` +
+    `${p2Parts.pgSz}${p2Parts.pgMar}${p2Parts.cols}${p2Parts.grid}` +
+    `<w:titlePg/>` +
+    `</w:sectPr>`;
 
   const p1DocOpenTagStart = p1Doc.indexOf('<w:document');
   const finalDocumentXml =
@@ -259,8 +270,6 @@ function mergeTwoTemplates(page1Buffer, page2Buffer, contentDocxBuffer, dateIssu
     p1Doc.slice(p1DocOpenTagStart, p1Doc.indexOf('<w:body>')) +
     '<w:body>' +
     p1Paragraphs +
-    section1BreakParagraph +
-    contentFragment +
     finalSectPr +
     '</w:body></w:document>';
 
