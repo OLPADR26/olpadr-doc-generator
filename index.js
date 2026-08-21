@@ -40,41 +40,49 @@ function runCommand(cmd, args, opts) {
   });
 }
 
-// Turn "Section N: Title" and "Artifact Name: Title" lines into real markdown headings
+// Turn "Section N: Title" and "Artifact Name: Title" into bold text (never a heading
+// style, so it can't inherit the template's colored Heading style — always plain black
+// bold, guaranteed consistent regardless of what template is in play).
 function normalizeMarkdown(text) {
   let out = text;
 
   out = out.replace(/(?:=\s){5,}=?/g, '\n\n---\n\n');
   out = out.replace(/(?:_\s){5,}_?/g, '\n\n---\n\n');
 
-  out = out.replace(/^Section \d+:\s*(.+)$/gm, '## Section: $1');
-  out = out.replace(/^Artifact Name:\s*(.+)$/gm, '## $1');
+  out = out.replace(/^Section \d+:\s*(.+)$/gm, '**Section: $1**');
+  out = out.replace(/^Artifact Name:\s*(.+)$/gm, '**$1**');
 
-  const subTitles = [
-    'Primary Accountability Context', 'Leading Asset Statement', 'Terminal Gap', 'Causal Anchor',
-    'Active Constraints', 'Assumptions', 'Executive Directive for Causal Mapping',
-    'Causal Spine Description', 'Logic Matrix', 'Visual Placeholder', 'Triage Brief',
-    'Full Minimum Viable Data Field List', 'Executive Recommendation', 'Programme Strengths',
-    'The Leakage Constraint', 'Baseline Gate Declaration', 'What-If Scenario Matrix',
-    'What-If Simulation Matrix', 'Scenario Notes', 'Simulation Pivot', 'What to Stop Doing',
-    'What to Double Down On', 'Constraint Workaround', 'Cost Per Beneficiary',
-    'Executive Architecture Directive', 'Sprint Pulse Report', 'Evidence Gap Alert',
-    'Active Constraint Check', 'Evidence Sensor', 'Sprint Gate Decision',
-    'Identified Chaos', 'Failure Type', 'Clinical Diagnostics', 'Evidence Ledger',
-    'Artifact Readiness', 'Causal Logic', 'Constraints', 'Auditor\u2019s Verdict',
-    'Reconciliation Note', 'Singular Architectural Move', 'Asset Statement',
-    'Terminal Constraint', 'Strategic Pivot', 'Current Evidence Position',
-    'Outcome Commitments', 'Evidence Gap', 'Data System Status', 'Minimum Viable Evidence Architecture',
-    'Indicator Architecture', 'Claim Control', 'Cost Position', 'Protocol Pathway',
-    'Post-Protocol Position', 'Decision Artifact', 'Conditions', 'Next-Season Plan',
-    'Grant-Ready Decision', 'Singular Strategic Recommendation'
-  ];
-  subTitles.forEach(title => {
-    const escaped = title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    out = out.replace(new RegExp(`^${escaped}$`, 'gm'), `### ${title}`);
-  });
-
+  out = boldStandaloneTitles(out);
   return out;
+}
+
+// Dynamically bolds any standalone "title-shaped" line — isolated by blank lines
+// above and below, short, and not ending in sentence punctuation — instead of
+// relying on a hardcoded list of known section names. This is what makes header
+// bolding work for ANY artifact/section name the agents produce, not just ones
+// someone happened to enumerate in advance.
+function boldStandaloneTitles(text) {
+  const lines = text.split('\n');
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    const prevBlank = i === 0 || lines[i - 1].trim() === '';
+    const nextBlank = i === lines.length - 1 || lines[i + 1].trim() === '';
+    const isTableRow = /^\s*\|/.test(line);
+    const isListItem = /^\s*([-*]|\d+\.)\s/.test(line);
+    const isDivider = /^-{3,}$/.test(trimmed) || trimmed === '---';
+    const alreadyBold = /^\*\*.*\*\*$/.test(trimmed);
+    const endsWithSentencePunct = /[.!?:;,]["'\u201d)\]]?$/.test(trimmed);
+    const looksLikeTitle =
+      trimmed.length > 0 &&
+      trimmed.length <= 90 &&
+      prevBlank && nextBlank &&
+      !isTableRow && !isListItem && !isDivider && !alreadyBold &&
+      !endsWithSentencePunct;
+    out.push(looksLikeTitle ? `**${trimmed}**` : line);
+  }
+  return out.join('\n');
 }
 
 // ---------- docx XML merge: pure string/regex splicing, no DOM parser ----------
@@ -84,144 +92,275 @@ function normalizeMarkdown(text) {
 // splicing instead — every operation here is plain JS string/regex work, which was
 // tested end-to-end (against the real letterhead + real generated content, verified
 // by rendering the resulting PDF) before being put here.
-function mergeDocxXmlStrings({ templateDocumentXml, contentDocumentXml, templateNumberingXml, contentNumberingXml, templateStylesXml, contentStylesXml, dateIssuedText }) {
-  // 1. Replace the letterhead's date placeholder, if present, with the real date.
-  let mergedTemplateDoc = templateDocumentXml;
-  if (dateIssuedText) {
-    mergedTemplateDoc = mergedTemplateDoc.replace('[Month DD, YYYY]', dateIssuedText);
-  }
-
-  // 2. Extract the content body's paragraphs/tables (everything between <w:body>
-  //    and its trailing <w:sectPr>...), and find the template's own trailing
-  //    sectPr position so we can splice content in before it, preserving its
-  //    headers/footers/margins.
-  const contentBodyStart = contentDocumentXml.indexOf('<w:body>') + '<w:body>'.length;
-  const contentSectPrIdx = contentDocumentXml.lastIndexOf('<w:sectPr');
-  if (contentBodyStart < '<w:body>'.length || contentSectPrIdx === -1) {
-    throw new Error('Could not locate <w:body> or trailing <w:sectPr> in generated content document.xml');
-  }
-  let contentBodyFragment = contentDocumentXml.slice(contentBodyStart, contentSectPrIdx);
-
-  const templateSectPrIdx = mergedTemplateDoc.lastIndexOf('<w:sectPr');
-  if (mergedTemplateDoc.indexOf('<w:body>') === -1 || templateSectPrIdx === -1) {
-    throw new Error('Could not locate <w:body> or trailing <w:sectPr> in template document.xml');
-  }
-
-  // 3. Numbering merge: remap numId/abstractNumId in the content fragment so they
-  //    don't collide with anything the template already defines.
-  let mergedNumberingXml = templateNumberingXml;
-  if (contentNumberingXml) {
-    const abstractBlocks = contentNumberingXml.match(/<w:abstractNum\b[\s\S]*?<\/w:abstractNum>/g) || [];
-    const numBlocks = contentNumberingXml.match(/<w:num\b[\s\S]*?<\/w:num>/g) || [];
-
-    if (templateNumberingXml) {
-      const existingAbstractIds = Array.from(templateNumberingXml.matchAll(/<w:abstractNum\b[^>]*\bw:abstractNumId="(\d+)"/g)).map(m => parseInt(m[1], 10));
-      const existingNumIds = Array.from(templateNumberingXml.matchAll(/<w:num\b[^>]*\bw:numId="(\d+)"/g)).map(m => parseInt(m[1], 10));
-      const abstractOffset = existingAbstractIds.length ? Math.max(...existingAbstractIds) + 1 : 0;
-      const numOffset = existingNumIds.length ? Math.max(...existingNumIds) + 1 : 0;
-
-      const abstractIdMap = {};
-      const rewrittenAbstractBlocks = abstractBlocks.map(block => {
-        const m = block.match(/w:abstractNumId="(\d+)"/);
-        if (!m) return block;
-        const oldId = parseInt(m[1], 10);
-        const newId = oldId + abstractOffset;
-        abstractIdMap[oldId] = newId;
-        return block.replace(`w:abstractNumId="${oldId}"`, `w:abstractNumId="${newId}"`);
-      });
-
-      const numIdMap = {};
-      const rewrittenNumBlocks = numBlocks.map(block => {
-        const numIdMatch = block.match(/<w:num\b[^>]*\bw:numId="(\d+)"/);
-        if (!numIdMatch) return block;
-        const oldNumId = parseInt(numIdMatch[1], 10);
-        const newNumId = oldNumId + numOffset;
-        numIdMap[oldNumId] = newNumId;
-        let rewritten = block.replace(`w:numId="${oldNumId}"`, `w:numId="${newNumId}"`);
-        const absRefMatch = rewritten.match(/<w:abstractNumId w:val="(\d+)"/);
-        if (absRefMatch) {
-          const oldAbs = parseInt(absRefMatch[1], 10);
-          if (abstractIdMap[oldAbs] !== undefined) {
-            rewritten = rewritten.replace(`<w:abstractNumId w:val="${oldAbs}"`, `<w:abstractNumId w:val="${abstractIdMap[oldAbs]}"`);
-          }
-        }
-        return rewritten;
-      });
-
-      contentBodyFragment = contentBodyFragment.replace(/<w:numId w:val="(\d+)"/g, (full, oldVal) => {
-        const mapped = numIdMap[parseInt(oldVal, 10)];
-        return mapped !== undefined ? `<w:numId w:val="${mapped}"` : full;
-      });
-
-      const insertion = rewrittenAbstractBlocks.join('') + rewrittenNumBlocks.join('');
-      mergedNumberingXml = templateNumberingXml.replace('</w:numbering>', insertion + '</w:numbering>');
-    } else {
-      mergedNumberingXml = contentNumberingXml;
-    }
-  }
-
-  // 4. Styles merge: copy over any style the content uses that the template
-  //    doesn't already define (by styleId).
-  let mergedStylesXml = templateStylesXml;
-  if (contentStylesXml && templateStylesXml) {
-    const styleBlocks = contentStylesXml.match(/<w:style\b[\s\S]*?<\/w:style>/g) || [];
-    const missingBlocks = styleBlocks.filter(block => {
-      const m = block.match(/w:styleId="([^"]+)"/);
-      if (!m) return false;
-      return !templateStylesXml.includes(`w:styleId="${m[1]}"`);
-    });
-    if (missingBlocks.length) {
-      mergedStylesXml = templateStylesXml.replace('</w:styles>', missingBlocks.join('') + '</w:styles>');
-    }
-  }
-
-  // 5. Splice the (remapped) content fragment into the template body, right
-  //    before its trailing sectPr.
-  const finalDocumentXml =
-    mergedTemplateDoc.slice(0, templateSectPrIdx) +
-    contentBodyFragment +
-    mergedTemplateDoc.slice(templateSectPrIdx);
-
-  return { documentXml: finalDocumentXml, numberingXml: mergedNumberingXml, stylesXml: mergedStylesXml };
+// ---------- Two-template merge: page-1 cover template + page-2-onward template + generated content ----------
+// This produces a document with TWO Word sections: section 1 is page1Template's own
+// content (its cover/date line) using page1's header/footer/margins; section 2 is the
+// generated report content using page2Template's header/footer/margins. A real section
+// break is required (not just a "different first page" toggle) because the two
+// templates use different page margins, which is a section-level property in OOXML.
+function extractSectPrParts(sectPrXml) {
+  const pgSz = sectPrXml.match(/<w:pgSz[^/]*\/>/);
+  const pgMar = sectPrXml.match(/<w:pgMar[^/]*\/>/);
+  const cols = sectPrXml.match(/<w:cols[^/]*\/>/);
+  const grid = sectPrXml.match(/<w:docGrid[^/]*\/>/);
+  return {
+    pgSz: pgSz ? pgSz[0] : '',
+    pgMar: pgMar ? pgMar[0] : '',
+    cols: cols ? cols[0] : '<w:cols w:space="720"/>',
+    grid: grid ? grid[0] : ''
+  };
 }
 
-// Merges generated `contentDocxBuffer` (body only) into `templateDocxBuffer`
-// (which supplies headers/footers/styles/sectPr). Returns a Buffer of the merged .docx.
-function mergeDocx(templateDocxBuffer, contentDocxBuffer, dateIssuedText) {
-  const templateZip = new PizZip(templateDocxBuffer);
-  const contentZip = new PizZip(contentDocxBuffer);
+function mergeNumbering(baseNumberingXml, contentNumberingXml, contentFragment) {
+  if (!contentNumberingXml) return { numberingXml: baseNumberingXml, contentFragment };
+  if (!baseNumberingXml) return { numberingXml: contentNumberingXml, contentFragment };
 
-  const templateDocumentFile = templateZip.file('word/document.xml');
-  const contentDocumentFile = contentZip.file('word/document.xml');
-  if (!templateDocumentFile) throw new Error('Template docx has no word/document.xml — is it a valid Word file?');
-  if (!contentDocumentFile) throw new Error('Generated content docx has no word/document.xml');
+  const abstractBlocks = contentNumberingXml.match(/<w:abstractNum\b[\s\S]*?<\/w:abstractNum>/g) || [];
+  const numBlocks = contentNumberingXml.match(/<w:num\b[\s\S]*?<\/w:num>/g) || [];
+  const existingAbstractIds = Array.from(baseNumberingXml.matchAll(/<w:abstractNum\b[^>]*\bw:abstractNumId="(\d+)"/g)).map(m => parseInt(m[1], 10));
+  const existingNumIds = Array.from(baseNumberingXml.matchAll(/<w:num\b[^>]*\bw:numId="(\d+)"/g)).map(m => parseInt(m[1], 10));
+  const abstractOffset = existingAbstractIds.length ? Math.max(...existingAbstractIds) + 1 : 0;
+  const numOffset = existingNumIds.length ? Math.max(...existingNumIds) + 1 : 0;
 
-  const templateNumberingFile = templateZip.file('word/numbering.xml');
-  const contentNumberingFile = contentZip.file('word/numbering.xml');
-  const templateStylesFile = templateZip.file('word/styles.xml');
-  const contentStylesFile = contentZip.file('word/styles.xml');
-
-  const result = mergeDocxXmlStrings({
-    templateDocumentXml: templateDocumentFile.asText(),
-    contentDocumentXml: contentDocumentFile.asText(),
-    templateNumberingXml: templateNumberingFile ? templateNumberingFile.asText() : null,
-    contentNumberingXml: contentNumberingFile ? contentNumberingFile.asText() : null,
-    templateStylesXml: templateStylesFile ? templateStylesFile.asText() : null,
-    contentStylesXml: contentStylesFile ? contentStylesFile.asText() : null,
-    dateIssuedText
+  const abstractIdMap = {};
+  const rewrittenAbstractBlocks = abstractBlocks.map(block => {
+    const m = block.match(/w:abstractNumId="(\d+)"/);
+    if (!m) return block;
+    const oldId = parseInt(m[1], 10);
+    const newId = oldId + abstractOffset;
+    abstractIdMap[oldId] = newId;
+    return block.replace(`w:abstractNumId="${oldId}"`, `w:abstractNumId="${newId}"`);
   });
 
-  templateZip.file('word/document.xml', result.documentXml);
-  if (result.numberingXml) templateZip.file('word/numbering.xml', result.numberingXml);
-  if (result.stylesXml) templateZip.file('word/styles.xml', result.stylesXml);
+  const numIdMap = {};
+  const rewrittenNumBlocks = numBlocks.map(block => {
+    const numIdMatch = block.match(/<w:num\b[^>]*\bw:numId="(\d+)"/);
+    if (!numIdMatch) return block;
+    const oldNumId = parseInt(numIdMatch[1], 10);
+    const newNumId = oldNumId + numOffset;
+    numIdMap[oldNumId] = newNumId;
+    let rewritten = block.replace(`w:numId="${oldNumId}"`, `w:numId="${newNumId}"`);
+    const absRefMatch = rewritten.match(/<w:abstractNumId w:val="(\d+)"/);
+    if (absRefMatch) {
+      const oldAbs = parseInt(absRefMatch[1], 10);
+      if (abstractIdMap[oldAbs] !== undefined) {
+        rewritten = rewritten.replace(`<w:abstractNumId w:val="${oldAbs}"`, `<w:abstractNumId w:val="${abstractIdMap[oldAbs]}"`);
+      }
+    }
+    return rewritten;
+  });
 
-  return templateZip.generate({ type: 'nodebuffer' });
+  // Single-pass regex+callback remap, done BEFORE this fragment is spliced anywhere
+  // else — critical, since sequential/repeated string replaces here can cascade and
+  // corrupt each other when offset ranges overlap (confirmed by direct testing).
+  const remappedFragment = contentFragment.replace(/<w:numId w:val="(\d+)"/g, (full, oldVal) => {
+    const mapped = numIdMap[parseInt(oldVal, 10)];
+    return mapped !== undefined ? `<w:numId w:val="${mapped}"` : full;
+  });
+
+  const insertion = rewrittenAbstractBlocks.join('') + rewrittenNumBlocks.join('');
+  const numberingXml = baseNumberingXml.replace('</w:numbering>', insertion + '</w:numbering>');
+  return { numberingXml, contentFragment: remappedFragment };
+}
+
+function mergeMissingStyles(baseStylesXml, otherStylesXmlList) {
+  let merged = baseStylesXml;
+  for (const src of otherStylesXmlList) {
+    if (!src) continue;
+    const existingIds = new Set(Array.from(merged.matchAll(/w:styleId="([^"]+)"/g)).map(m => m[1]));
+    const blocks = src.match(/<w:style\b[\s\S]*?<\/w:style>/g) || [];
+    const missing = blocks.filter(b => {
+      const m = b.match(/w:styleId="([^"]+)"/);
+      return m && !existingIds.has(m[1]);
+    });
+    if (missing.length) {
+      merged = merged.replace('</w:styles>', missing.join('') + '</w:styles>');
+      // keep existingIds current across sources so we don't add the same style twice
+      missing.forEach(b => {
+        const m = b.match(/w:styleId="([^"]+)"/);
+        if (m) existingIds.add(m[1]);
+      });
+    }
+  }
+  return merged;
+}
+
+// Merges page1Buffer (cover page template), page2Buffer (page-2-onward template), and
+// contentDocxBuffer (generated report body) into one docx with a real section break.
+function mergeTwoTemplates(page1Buffer, page2Buffer, contentDocxBuffer, dateIssuedText) {
+  const page1Zip = new PizZip(page1Buffer);
+  const page2Zip = new PizZip(page2Buffer);
+  const contentZip = new PizZip(contentDocxBuffer);
+
+  let p1Doc = page1Zip.file('word/document.xml').asText();
+  const p2Doc = page2Zip.file('word/document.xml').asText();
+  const contentDoc = contentZip.file('word/document.xml').asText();
+
+  if (dateIssuedText) {
+    p1Doc = p1Doc.replace('[Month DD, YYYY]', dateIssuedText);
+  }
+  // Drop page1's own "[Body content begins here]" placeholder paragraph — content now
+  // starts on page 2, so page 1 should show only its own fixed cover content.
+  p1Doc = p1Doc.replace(
+    /<w:p [^>]*><w:r><w:rPr><w:i\/><w:iCs\/><w:color w:val="B4B2A9"\/><\/w:rPr><w:t>\[Body content begins here\]<\/w:t><\/w:r><w:bookmarkEnd[^/]*\/><\/w:p>/,
+    ''
+  );
+
+  const p1BodyStart = p1Doc.indexOf('<w:body>') + '<w:body>'.length;
+  const p1SectPrStart = p1Doc.lastIndexOf('<w:sectPr');
+  const p1SectPrEnd = p1Doc.indexOf('</w:sectPr>', p1SectPrStart) + '</w:sectPr>'.length;
+  const p1Paragraphs = p1Doc.slice(p1BodyStart, p1SectPrStart);
+  const p1SectPrXml = p1Doc.slice(p1SectPrStart, p1SectPrEnd);
+
+  const p2SectPrStart = p2Doc.lastIndexOf('<w:sectPr');
+  const p2SectPrEnd = p2Doc.indexOf('</w:sectPr>', p2SectPrStart) + '</w:sectPr>'.length;
+  const p2SectPrXml = p2Doc.slice(p2SectPrStart, p2SectPrEnd);
+
+  const p1Parts = extractSectPrParts(p1SectPrXml);
+  const p2Parts = extractSectPrParts(p2SectPrXml);
+
+  const cBodyStart = contentDoc.indexOf('<w:body>') + '<w:body>'.length;
+  const cSectPrStart = contentDoc.lastIndexOf('<w:sectPr');
+  let contentFragment = contentDoc.slice(cBodyStart, cSectPrStart);
+
+  // Numbering: page1's numbering.xml (if any) + content's, remapped. Page2 templates
+  // don't carry their own numbering.xml, so page1's is the base.
+  const p1NumberingFile = page1Zip.file('word/numbering.xml');
+  const contentNumberingFile = contentZip.file('word/numbering.xml');
+  const numberingResult = mergeNumbering(
+    p1NumberingFile ? p1NumberingFile.asText() : null,
+    contentNumberingFile ? contentNumberingFile.asText() : null,
+    contentFragment
+  );
+  contentFragment = numberingResult.contentFragment;
+  const mergedNumberingXml = numberingResult.numberingXml;
+
+  // Styles: page1's base, plus any missing styles from page2 and content.
+  const p1StylesXml = page1Zip.file('word/styles.xml').asText();
+  const p2StylesXml = page2Zip.file('word/styles.xml').asText();
+  const contentStylesFile = contentZip.file('word/styles.xml');
+  const mergedStylesXml = mergeMissingStyles(p1StylesXml, [p2StylesXml, contentStylesFile ? contentStylesFile.asText() : null]);
+
+  // Build the two-section document.xml
+  const section1BreakSectPr =
+    `<w:sectPr><w:headerReference w:type="default" r:id="rIdHdrP1"/>` +
+    `<w:footerReference w:type="default" r:id="rIdFtrP1"/>` +
+    `${p1Parts.pgSz}${p1Parts.pgMar}${p1Parts.cols}${p1Parts.grid}</w:sectPr>`;
+  const section1BreakParagraph = `<w:p><w:pPr>${section1BreakSectPr}</w:pPr></w:p>`;
+
+  const finalSectPr =
+    `<w:sectPr><w:headerReference w:type="default" r:id="rIdHdrP2"/>` +
+    `<w:footerReference w:type="default" r:id="rIdFtrP2"/>` +
+    `${p2Parts.pgSz}${p2Parts.pgMar}${p2Parts.cols}${p2Parts.grid}</w:sectPr>`;
+
+  const p1DocOpenTagStart = p1Doc.indexOf('<w:document');
+  const finalDocumentXml =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n' +
+    p1Doc.slice(p1DocOpenTagStart, p1Doc.indexOf('<w:body>')) +
+    '<w:body>' +
+    p1Paragraphs +
+    section1BreakParagraph +
+    contentFragment +
+    finalSectPr +
+    '</w:body></w:document>';
+
+  // Assemble the output package: page1's singleton parts (settings/fontTable/theme/etc,
+  // media), each template's own default header/footer renamed to avoid collisions, a
+  // fresh minimal document.xml.rels, and fresh [Content_Types].xml. We only carry the
+  // "default" header/footer type from each template — confirmed neither template has
+  // evenAndOddHeaders or titlePg active, so "even"/"first" header/footer parts are
+  // unused dead weight and are deliberately dropped rather than carried over.
+  const singletonParts = [
+    'docProps/core.xml', 'docProps/app.xml', '_rels/.rels', 'word/fontTable.xml',
+    'word/settings.xml', 'word/webSettings.xml', 'word/theme/theme1.xml',
+    'word/footnotes.xml', 'word/endnotes.xml', 'word/media/image1.png'
+  ];
+
+  const outZip = new PizZip();
+  for (const name of singletonParts) {
+    const f = page1Zip.file(name);
+    if (f) outZip.file(name, f.asUint8Array());
+  }
+
+  outZip.file('word/document.xml', finalDocumentXml);
+  outZip.file('word/styles.xml', mergedStylesXml);
+  if (mergedNumberingXml) outZip.file('word/numbering.xml', mergedNumberingXml);
+
+  outZip.file('word/header_p1.xml', page1Zip.file('word/header2.xml').asUint8Array());
+  outZip.file('word/footer_p1.xml', page1Zip.file('word/footer2.xml').asUint8Array());
+  outZip.file('word/header_p2.xml', page2Zip.file('word/header2.xml').asUint8Array());
+  outZip.file('word/footer_p2.xml', page2Zip.file('word/footer2.xml').asUint8Array());
+  const p1HeaderRels = page1Zip.file('word/_rels/header2.xml.rels');
+  const p1FooterRels = page1Zip.file('word/_rels/footer2.xml.rels');
+  const p2HeaderRels = page2Zip.file('word/_rels/header2.xml.rels');
+  const p2FooterRels = page2Zip.file('word/_rels/footer2.xml.rels');
+  if (p1HeaderRels) outZip.file('word/_rels/header_p1.xml.rels', p1HeaderRels.asUint8Array());
+  if (p1FooterRels) outZip.file('word/_rels/footer_p1.xml.rels', p1FooterRels.asUint8Array());
+  if (p2HeaderRels) outZip.file('word/_rels/header_p2.xml.rels', p2HeaderRels.asUint8Array());
+  if (p2FooterRels) outZip.file('word/_rels/footer_p2.xml.rels', p2FooterRels.asUint8Array());
+
+  const relParts = [
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">',
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>',
+    '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>',
+    '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/webSettings" Target="webSettings.xml"/>',
+    '<Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable" Target="fontTable.xml"/>',
+    '<Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/>',
+    '<Relationship Id="rId6" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/>',
+    '<Relationship Id="rId7" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes" Target="endnotes.xml"/>',
+    '<Relationship Id="rIdHdrP1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header_p1.xml"/>',
+    '<Relationship Id="rIdFtrP1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer_p1.xml"/>',
+    '<Relationship Id="rIdHdrP2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header_p2.xml"/>',
+    '<Relationship Id="rIdFtrP2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer_p2.xml"/>'
+  ];
+  if (mergedNumberingXml) {
+    relParts.push('<Relationship Id="rId8" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>');
+  }
+  relParts.push('</Relationships>');
+  outZip.file('word/_rels/document.xml.rels', relParts.join(''));
+
+  const ctParts = [
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">',
+    '<Default Extension="png" ContentType="image/png"/>',
+    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>',
+    '<Default Extension="xml" ContentType="application/xml"/>',
+    '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>',
+    '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>',
+    '<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/>',
+    '<Override PartName="/word/webSettings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.webSettings+xml"/>',
+    '<Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/>',
+    '<Override PartName="/word/endnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml"/>',
+    '<Override PartName="/word/header_p1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>',
+    '<Override PartName="/word/footer_p1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>',
+    '<Override PartName="/word/header_p2.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>',
+    '<Override PartName="/word/footer_p2.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>',
+    '<Override PartName="/word/fontTable.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml"/>',
+    '<Override PartName="/word/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>',
+    '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>',
+    '<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>'
+  ];
+  if (mergedNumberingXml) {
+    ctParts.push('<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>');
+  }
+  ctParts.push('</Types>');
+  outZip.file('[Content_Types].xml', ctParts.join(''));
+
+  return outZip.generate({ type: 'nodebuffer' });
 }
 
 app.post('/generate', async (req, res) => {
   let tempDir;
   try {
-    const { templateUrl, markdownContent, fileName, headerText, dateIssued } = req.body;
+    const { templateUrl, templateUrlPage1, templateUrlRest, markdownContent, fileName, headerText, dateIssued } = req.body;
+    // Accepts either the new two-template fields (templateUrlPage1 + templateUrlRest)
+    // or, for backwards compatibility, a single `templateUrl` used for both.
+    const page1Url = templateUrlPage1 || templateUrl;
+    const page2Url = templateUrlRest || templateUrlPage1 || templateUrl;
+    if (!page1Url || !page2Url) {
+      throw new Error('templateUrlPage1 and templateUrlRest (or templateUrl) are required');
+    }
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doc-'));
 
     // 1. Markdown -> HTML (no headerText prefix here — the letterhead template
@@ -280,10 +419,11 @@ app.post('/generate', async (req, res) => {
       );
     }
 
-    // 3. Download the letterhead template.
-    const templateBuffer = await fetchBuffer(templateUrl);
+    // 3. Download both letterhead templates: page 1 (cover) and page 2 onward.
+    const page1Buffer = await fetchBuffer(page1Url);
+    const page2Buffer = await fetchBuffer(page2Url);
 
-    // 4. Work out the date text to inject into the letterhead's own placeholder.
+    // 4. Work out the date text to inject into page 1's own placeholder.
     //    Accepts either a dedicated `dateIssued` field, or extracts it from a
     //    `headerText` like "Report date: 19 Aug 2026" (strips the label).
     let dateIssuedText = (dateIssued || '').trim();
@@ -291,11 +431,11 @@ app.post('/generate', async (req, res) => {
       dateIssuedText = headerText.replace(/^\s*report date\s*:\s*/i, '').trim();
     }
 
-    // 5. Merge template + generated content (real XML surgery, not a third-party
-    //    "merge two docx files" library — those are a known source of silently
-    //    corrupt output, which is what caused the previous failure).
+    // 5. Merge page1 template + page2 template + generated content into one docx
+    //    with a real section break (page1 and page2 templates use different page
+    //    margins, so this can't be done with a simple "different first page" toggle).
     const contentDocxBuffer = fs.readFileSync(contentDocxPath);
-    const mergedBuffer = mergeDocx(templateBuffer, contentDocxBuffer, dateIssuedText);
+    const mergedBuffer = mergeTwoTemplates(page1Buffer, page2Buffer, contentDocxBuffer, dateIssuedText);
     const mergedPath = path.join(tempDir, 'output.docx');
     fs.writeFileSync(mergedPath, mergedBuffer);
 
