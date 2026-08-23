@@ -382,6 +382,7 @@ app.post('/generate', async (req, res) => {
       h2, h3 { color: #000000; font-weight: bold; }
       table { border-collapse: collapse; width: 100%; margin: 8px 0; }
       table, th, td { border: 1px solid #444444; padding: 4px 8px; }
+      p { margin-top: 0; margin-bottom: 0.14in; }
     </style></head><body>${htmlBody}</body></html>`;
 
     const htmlPath = path.join(tempDir, 'content.html');
