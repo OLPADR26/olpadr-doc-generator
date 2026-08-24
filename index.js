@@ -241,12 +241,15 @@ function mergeTwoTemplates(page1Buffer, page2Buffer, contentDocxBuffer, dateIssu
 
   // Replace page1's "[Body content begins here]" placeholder paragraph with the actual
   // generated content — content starts ON page 1, right after the date line.
-  const placeholderPattern = /<w:p [^>]*><w:r><w:rPr><w:i\/><w:iCs\/><w:color w:val="B4B2A9"\/><\/w:rPr><w:t>\[Body content begins here\]<\/w:t><\/w:r><w:bookmarkEnd[^/]*\/><\/w:p>/;
+  // Use a loose pattern that matches any paragraph containing this placeholder text,
+  // regardless of the exact surrounding XML structure (italic/color formatting, bookmarks,
+  // etc. may differ between template versions).
+  const placeholderPattern = /<w:p\b[^>]*>(?:(?!<w:p\b).)*?\[Body content begins here\](?:(?!<w:p\b).)*?<\/w:p>/s;
   if (placeholderPattern.test(p1Paragraphs)) {
     p1Paragraphs = p1Paragraphs.replace(placeholderPattern, contentFragment);
   } else {
-    // Fallback: if the exact placeholder shape isn't found, just append content
-    // after page1's own paragraphs rather than silently dropping it.
+    // Fallback: placeholder not found in template — append content after page1's own
+    // paragraphs rather than silently losing it.
     p1Paragraphs = p1Paragraphs + contentFragment;
   }
 
@@ -254,13 +257,26 @@ function mergeTwoTemplates(page1Buffer, page2Buffer, contentDocxBuffer, dateIssu
   // header/footer (page1 template's), every subsequent page uses the "default"
   // header/footer (page2 template's) — pagination happens naturally as content
   // overflows, no manual page-break bookkeeping needed.
+  // Margins: use 720 twips (0.5") left/right throughout — narrower than page2's
+  // native 1008 twips, giving wide tables (e.g. 6-column Indicator Dictionary)
+  // enough room to render without content overflowing the page edge. Top/bottom
+  // and header/footer offsets are kept from page2's template.
+  const p2MarMatch = p2SectPrXml.match(/<w:pgMar([^/]*)\/>/);
+  let finalPgMar = p2Parts.pgMar;
+  if (p2MarMatch) {
+    // Override left/right to 720 twips, keep top/bottom/header/footer from template
+    finalPgMar = p2Parts.pgMar
+      .replace(/w:left="[^"]*"/, 'w:left="720"')
+      .replace(/w:right="[^"]*"/, 'w:right="720"');
+  }
+
   const finalSectPr =
     `<w:sectPr>` +
     `<w:headerReference w:type="default" r:id="rIdHdrP2"/>` +
     `<w:footerReference w:type="default" r:id="rIdFtrP2"/>` +
     `<w:headerReference w:type="first" r:id="rIdHdrP1"/>` +
     `<w:footerReference w:type="first" r:id="rIdFtrP1"/>` +
-    `${p2Parts.pgSz}${p2Parts.pgMar}${p2Parts.cols}${p2Parts.grid}` +
+    `${p2Parts.pgSz}${finalPgMar}${p2Parts.cols}${p2Parts.grid}` +
     `<w:titlePg/>` +
     `</w:sectPr>`;
 
@@ -380,8 +396,9 @@ app.post('/generate', async (req, res) => {
     const fullHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
       body { font-family: Calibri, Arial, sans-serif; color: #000000; font-size: 11pt; }
       h2, h3 { color: #000000; font-weight: bold; }
-      table { border-collapse: collapse; width: 100%; margin: 8px 0; }
-      table, th, td { border: 1px solid #444444; padding: 4px 8px; }
+      table { border-collapse: collapse; width: 100%; margin: 8px 0; table-layout: fixed; word-wrap: break-word; }
+      table, th, td { border: 1px solid #444444; padding: 3px 6px; }
+      th, td { overflow-wrap: break-word; word-break: break-word; }
       p { margin-top: 0; margin-bottom: 0.14in; }
     </style></head><body>${htmlBody}</body></html>`;
 
