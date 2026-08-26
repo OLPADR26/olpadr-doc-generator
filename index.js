@@ -204,6 +204,15 @@ function mergeTwoTemplates(page1Buffer, page2Buffer, contentDocxBuffer, dateIssu
   const p1SectPrStart = p1Doc.lastIndexOf('<w:sectPr');
   let p1Paragraphs = p1Doc.slice(p1BodyStart, p1SectPrStart);
 
+  // Reduce the gap between the date line and first content line by tightening the
+  // empty spacer paragraph that sits between them. 400→240 twips is a ~40% reduction
+  // — visible but deliberate, not dramatic. Targets only empty paragraphs with exactly
+  // this spacing value, so body text spacing elsewhere is unaffected.
+  p1Paragraphs = p1Paragraphs.replace(
+    /<w:p\b[^>]*>\s*<w:pPr>\s*<w:spacing w:after="400"\/>\s*<\/w:pPr>\s*<\/w:p>/,
+    (m) => m.replace('w:after="400"', 'w:after="240"')
+  );
+
   const p2SectPrStart = p2Doc.lastIndexOf('<w:sectPr');
   const p2SectPrEnd = p2Doc.indexOf('</w:sectPr>', p2SectPrStart) + '</w:sectPr>'.length;
   const p2SectPrXml = p2Doc.slice(p2SectPrStart, p2SectPrEnd);
