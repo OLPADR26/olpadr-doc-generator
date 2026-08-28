@@ -185,6 +185,34 @@ function mergeMissingStyles(baseStylesXml, otherStylesXmlList) {
   return merged;
 }
 
+// Uniform table border definition — single, solid, black, 4 half-points (0.5pt).
+// Applied to every table side so borders are always visible and consistent regardless
+// of what the HTML→ODT→DOCX conversion may or may not have preserved.
+const TABLE_BORDERS =
+  '<w:tblBorders>' +
+  '<w:top w:val="single" w:sz="4" w:space="0" w:color="444444"/>' +
+  '<w:left w:val="single" w:sz="4" w:space="0" w:color="444444"/>' +
+  '<w:bottom w:val="single" w:sz="4" w:space="0" w:color="444444"/>' +
+  '<w:right w:val="single" w:sz="4" w:space="0" w:color="444444"/>' +
+  '<w:insideH w:val="single" w:sz="4" w:space="0" w:color="444444"/>' +
+  '<w:insideV w:val="single" w:sz="4" w:space="0" w:color="444444"/>' +
+  '</w:tblBorders>';
+
+// Enforce uniform visible borders on every table in the content fragment:
+// replace any existing tblBorders block, or inject one if absent.
+function enforceTableBorders(fragment) {
+  // Replace existing tblBorders blocks
+  let result = fragment.replace(/<w:tblBorders>[\s\S]*?<\/w:tblBorders>/g, TABLE_BORDERS);
+  // Inject into tblPr blocks that have no tblBorders at all
+  result = result.replace(/(<w:tblPr>(?:(?!<\/w:tblPr>)(?!<w:tblBorders>)[\s\S])*?)(<\/w:tblPr>)/g,
+    (match, before, close) => {
+      if (match.includes('<w:tblBorders>')) return match;
+      return before + TABLE_BORDERS + close;
+    }
+  );
+  return result;
+}
+
 // Merges page1Buffer (cover page template), page2Buffer (page-2-onward template), and
 // contentDocxBuffer (generated report body) into one docx with a real section break.
 function mergeTwoTemplates(page1Buffer, page2Buffer, contentDocxBuffer, dateIssuedText) {
@@ -229,6 +257,22 @@ function mergeTwoTemplates(page1Buffer, page2Buffer, contentDocxBuffer, dateIssu
   const cBodyStart = contentDoc.indexOf('<w:body>') + '<w:body>'.length;
   const cSectPrStart = contentDoc.lastIndexOf('<w:sectPr');
   let contentFragment = contentDoc.slice(cBodyStart, cSectPrStart);
+
+  // Fix table overflow: clamp every table to the actual page text width and switch to
+  // autofit layout so columns redistribute proportionally rather than spilling off the
+  // right edge. Page text width = 12240 (letter) - 720 (left margin) - 720 (right) = 10800.
+  // LibreOffice's HTML→DOCX converter sets tblW to the raw HTML table pixel width
+  // (often wider than the page) and locks layout to "fixed", which is exactly why the
+  // last column disappears off the right edge on wide tables like the 6-column
+  // Indicator Dictionary. Switching to autofit + capping tblW forces a proportional
+  // column redistribution that stays within the page.
+  contentFragment = contentFragment
+    .replace(/<w:tblW w:w="[^"]*" w:type="dxa"\/>/g, '<w:tblW w:w="10800" w:type="dxa"/>')
+    .replace(/<w:tblW w:w="[^"]*" w:type="pct"\/>/g, '<w:tblW w:w="5000" w:type="pct"/>')
+    .replace(/<w:tblLayout w:type="fixed"\/>/g, '<w:tblLayout w:type="autofit"/>');
+
+  // Enforce uniform visible borders on every table.
+  contentFragment = enforceTableBorders(contentFragment);
 
   // Numbering: page1's numbering.xml (if any) + content's, remapped. Page2 templates
   // don't carry their own numbering.xml, so page1's is the base.
@@ -405,7 +449,7 @@ app.post('/generate', async (req, res) => {
     const fullHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
       body { font-family: Calibri, Arial, sans-serif; color: #000000; font-size: 11pt; }
       h2, h3 { color: #000000; font-weight: bold; }
-      table { border-collapse: collapse; width: 100%; margin: 8px 0; table-layout: fixed; word-wrap: break-word; }
+      table { border-collapse: collapse; width: 100%; margin: 8px 0; }
       table, th, td { border: 1px solid #444444; padding: 3px 6px; }
       th, td { overflow-wrap: break-word; word-break: break-word; }
       p { margin-top: 0; margin-bottom: 0.14in; }
